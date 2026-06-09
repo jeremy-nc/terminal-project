@@ -83,6 +83,40 @@ if os.path.isdir(DIST):
     app.mount("/assets", StaticFiles(directory=os.path.join(DIST, "assets")), name="assets")
 
 
+def _resolve_cwd(raw: str, global_cwd: str) -> str:
+    """Expand ~ and resolve relative paths, mirroring coordinator._resolve_cwd."""
+    expanded = os.path.expanduser(raw)
+    if not os.path.isabs(expanded):
+        base = global_cwd if global_cwd else os.getcwd()
+        expanded = os.path.join(base, expanded)
+    return os.path.normpath(expanded)
+
+
+def _validate_cwds(spec: dict, global_cwd: str = None) -> str:
+    """Walk the spec tree and verify every resolved cwd exists.
+    Returns an error string on the first bad path, or None if all are valid."""
+    # Resolve global dir from root spec
+    if spec.get("type") == "sequence" and spec.get("id") == "root" and spec.get("cwd"):
+        global_cwd = _resolve_cwd(spec["cwd"], None)
+        if not os.path.isdir(global_cwd):
+            return f"Global dir does not exist or is not a directory: {global_cwd!r}"
+
+    ntype = spec.get("type")
+    if ntype == "terminal":
+        raw = spec.get("cwd")
+        if raw:
+            resolved = _resolve_cwd(raw, global_cwd)
+            if not os.path.isdir(resolved):
+                argv_str = " ".join(spec.get("argv", []))
+                return f"Working directory does not exist for {argv_str!r}: {resolved!r}"
+    elif ntype in ("batch", "sequence"):
+        for child in spec.get("nodes", []):
+            err = _validate_cwds(child, global_cwd)
+            if err:
+                return err
+    return None
+
+
 def handle_msg(sub: Subscriber, msg: dict) -> None:
     """Dispatch one client message; replies are enqueued on ``sub``."""
     mtype = msg.get("type")
@@ -106,6 +140,10 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         spec = msg.get("pipeline")
         if not spec:
             sub.send({"type": "error", "message": "missing pipeline spec"})
+            return
+        cwd_error = _validate_cwds(spec)
+        if cwd_error:
+            sub.send({"type": "error", "message": cwd_error})
             return
         try:
             root = build_node_tree(spec, manager, sub)

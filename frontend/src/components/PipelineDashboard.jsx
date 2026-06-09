@@ -25,9 +25,12 @@ function NodeTerminal({ tabId }) {
 export default function PipelineDashboard({ pipelines, tabs }) {
   const [specText, setSpecText] = useState(
     "# Sample Pipeline\n" +
+    "dir: @~/Code/terminal-project\n" +
     "seq:   auggie --print -m prism-a --mcp-config '{}' \"hello no code edits\"\n" +
     "batch: claude, bash -c \"sleep 2; echo Job B\"\n" +
-    "seq:   bash -c \"echo Done. Output: {{input}}\""
+    "seq:   bash -c \"echo Done. Output: {{input}}\"\n" +
+    "# Per-command dir: append @path or @\"path with spaces\"\n" +
+    "# seq: git log @~/Code/terminal-project"
   );
   const [preview, setPreview] = useState(null);
 

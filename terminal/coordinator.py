@@ -1,4 +1,5 @@
 import asyncio
+import os
 from typing import Any, List, Optional, Callable
 from .manager import SessionManager
 from .session import Subscriber
@@ -79,6 +80,7 @@ class TerminalNode(Node):
         rows: int = 24,
         event_bus: Subscriber = None,
         node_id: Any = None,
+        cwd: str = None,
     ):
         self.manager = manager
         self.argv_template = argv_template
@@ -88,6 +90,7 @@ class TerminalNode(Node):
         # Spec id from the DSL, echoed back in events so the client can overlay
         # live status/session onto the correct node in the pipeline tree.
         self.node_id = node_id
+        self.cwd = cwd
         self.current_session_id = None
 
     async def run(self, input_data: Any) -> Any:
@@ -97,7 +100,7 @@ class TerminalNode(Node):
         ]
 
         sub = CollectorSubscriber()
-        sess = self.manager.create(cols=self.cols, rows=self.rows, argv=argv)
+        sess = self.manager.create(cols=self.cols, rows=self.rows, argv=argv, cwd=self.cwd)
         self.current_session_id = sess.id
         self.manager.attach(sess, sub)
 
@@ -202,10 +205,42 @@ class PipelineEngine:
 
 
 
-def build_node_tree(spec: dict, manager: SessionManager, event_bus: Subscriber) -> Node:
-    """Recursively build a Node tree from a JSON-serializable spec."""
+def _resolve_cwd(raw: str, global_cwd: str) -> str:
+    """
+    Expand ~ and resolve relative paths.
+    Relative paths are resolved against global_cwd if set, else the server cwd.
+    """
+    expanded = os.path.expanduser(raw)
+    if not os.path.isabs(expanded):
+        base = global_cwd if global_cwd else os.getcwd()
+        expanded = os.path.join(base, expanded)
+    return os.path.normpath(expanded)
+
+
+def build_node_tree(
+    spec: dict,
+    manager: SessionManager,
+    event_bus: Subscriber,
+    _global_cwd: str = None,
+) -> Node:
+    """Recursively build a Node tree from a JSON-serializable spec.
+
+    cwd propagation rules:
+      - The root spec may carry a 'cwd' field (from 'dir:' in the DSL) — this
+        becomes the global default for all descendant leaf nodes.
+      - Each node may carry its own 'cwd' field (from a trailing '@path' in the
+        DSL) — this overrides the inherited global for that leaf only.
+      - Relative paths are resolved against the global cwd if set, else the
+        server's cwd (repo root).  '~' is expanded to $HOME.
+    """
+    # The root sequence node may carry the global dir.
+    if spec.get("type") == "sequence" and spec.get("id") == "root" and spec.get("cwd"):
+        _global_cwd = _resolve_cwd(spec["cwd"], None)
+
     ntype = spec.get("type")
     if ntype == "terminal":
+        raw_cwd = spec.get("cwd")
+        resolved = _resolve_cwd(raw_cwd, _global_cwd) if raw_cwd else _global_cwd
         return TerminalNode(
             manager=manager,
             argv_template=spec["argv"],
@@ -213,12 +248,13 @@ def build_node_tree(spec: dict, manager: SessionManager, event_bus: Subscriber) 
             rows=spec.get("rows", 24),
             event_bus=event_bus,
             node_id=spec.get("id"),
+            cwd=resolved,
         )
     elif ntype == "batch":
-        nodes = [build_node_tree(n, manager, event_bus) for n in spec["nodes"]]
+        nodes = [build_node_tree(n, manager, event_bus, _global_cwd) for n in spec["nodes"]]
         return BatchNode(nodes, concurrency=spec.get("concurrency"), event_bus=event_bus)
     elif ntype == "sequence":
-        nodes = [build_node_tree(n, manager, event_bus) for n in spec["nodes"]]
+        nodes = [build_node_tree(n, manager, event_bus, _global_cwd) for n in spec["nodes"]]
         return SequenceNode(nodes, event_bus=event_bus)
     else:
         raise ValueError(f"Unknown node type: {ntype}")

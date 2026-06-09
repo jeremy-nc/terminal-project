@@ -21,7 +21,7 @@ class SessionManager:
         self.sessions = {}
         self.loop = None
 
-    def create(self, shell_name: str = None, cols: int = 80, rows: int = 24, argv: list = None) -> Session:
+    def create(self, shell_name: str = None, cols: int = 80, rows: int = 24, argv: list = None, cwd: str = None) -> Session:
         sid = uuid.uuid4().hex[:8]
         if not argv:
             argv = resolve_shell(shell_name or "bash")
@@ -29,6 +29,14 @@ class SessionManager:
         if pid == 0:  # child
             env = os.environ.copy()
             env["TERM"] = "xterm-256color"
+            if cwd:
+                try:
+                    os.chdir(cwd)
+                except OSError as e:
+                    # Print to stderr (visible in server log), then fall through
+                    # to exec so the session still starts (in the original dir).
+                    import sys
+                    print(f"[pty] chdir({cwd!r}) failed: {e}", file=sys.stderr, flush=True)
             try:
                 os.execvpe(argv[0], argv, env)
             except FileNotFoundError:

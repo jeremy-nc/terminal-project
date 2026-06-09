@@ -20,16 +20,8 @@ PROTOCOL (JSON, both directions)
 """
 import asyncio
 import base64
-import fcntl
 import json
 import os
-import pty
-import shutil
-import signal
-import struct
-import termios
-import uuid
-from collections import deque
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -37,8 +29,8 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-MAX_BUFFER_BYTES = 256 * 1024  # per-session ring buffer cap
-GRACE_PERIOD = 30  # seconds to wait for reconnect before killing an orphan PTY
+from terminal import SessionManager, Subscriber
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "frontend", "dist")
 
@@ -51,156 +43,15 @@ def unb64(data: str) -> bytes:
     return base64.b64decode(data.encode("ascii"))
 
 
-def set_winsize(fd: int, rows: int, cols: int) -> None:
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+def to_wire(event: dict) -> str:
+    """Serialise a domain/transport event to the JSON wire format.
 
-
-def resolve_shell(name: str) -> list:
-    """Resolve a requested shell name to an argv list, falling back to bash."""
-    if name == "claude" and shutil.which("claude"):
-        return ["claude"]
-    return [os.environ.get("SHELL") or "bash"]
-
-
-class Session:
-    def __init__(self, sid, fd, pid, cols, rows):
-        self.id = sid
-        self.fd = fd
-        self.pid = pid
-        self.cols = cols
-        self.rows = rows
-        self.buffer = deque()
-        self.buffer_size = 0
-        self.queue: asyncio.Queue = asyncio.Queue()
-        self.clients = set()  # connected WebSocket objects
-        self.alive = True
-        self.cleanup_task = None
-
-    def append(self, data: bytes) -> None:
-        """Append to the ring buffer, evicting oldest chunks past the cap."""
-        self.buffer.append(data)
-        self.buffer_size += len(data)
-        while self.buffer_size > MAX_BUFFER_BYTES and len(self.buffer) > 1:
-            self.buffer_size -= len(self.buffer.popleft())
-
-    def snapshot(self) -> bytes:
-        return b"".join(self.buffer)
-
-
-class SessionManager:
-    def __init__(self):
-        self.sessions = {}
-        self.loop = None
-
-    def create(self, shell_name: str, cols: int, rows: int) -> Session:
-        sid = uuid.uuid4().hex[:8]
-        argv = resolve_shell(shell_name)
-        pid, fd = pty.fork()
-        if pid == 0:  # child
-            env = os.environ.copy()
-            env["TERM"] = "xterm-256color"
-            try:
-                os.execvpe(argv[0], argv, env)
-            except FileNotFoundError:
-                os.execvpe("bash", ["bash"], env)
-            os._exit(1)
-        # parent
-        set_winsize(fd, rows, cols)
-        os.set_blocking(fd, False)
-        sess = Session(sid, fd, pid, cols, rows)
-        self.sessions[sid] = sess
-        self.loop.add_reader(fd, self._on_readable, sess)
-        asyncio.create_task(self._broadcast_loop(sess))
-        print(f"[sess] create {sid} pid={pid} fd={fd} (total={len(self.sessions)})", flush=True)
-        return sess
-
-    def _on_readable(self, sess: Session) -> None:
-        """Sync reader registered with the event loop; ordered via the queue."""
-        try:
-            data = os.read(sess.fd, 65536)
-        except OSError:
-            data = b""
-        if not data:  # EOF: the child has exited
-            self.loop.remove_reader(sess.fd)
-            sess.queue.put_nowait(None)
-            return
-        sess.append(data)
-        sess.queue.put_nowait(data)
-
-    async def _broadcast_loop(self, sess: Session) -> None:
-        while True:
-            data = await sess.queue.get()
-            if data is None:
-                await self._handle_exit(sess)
-                return
-            await self._send_all(
-                sess, {"type": "stdout", "id": sess.id, "data": b64(data)}
-            )
-
-    async def _send_all(self, sess: Session, msg: dict) -> None:
-        payload = json.dumps(msg)
-        dead = []
-        for ws in list(sess.clients):
-            try:
-                await ws.send_text(payload)
-            except Exception:
-                dead.append(ws)
-        for ws in dead:
-            sess.clients.discard(ws)
-
-    async def _handle_exit(self, sess: Session) -> None:
-        sess.alive = False
-        code = None
-        try:
-            _, status = os.waitpid(sess.pid, 0)
-            code = os.waitstatus_to_exitcode(status)
-        except ChildProcessError:
-            pass
-        await self._send_all(sess, {"type": "exit", "id": sess.id, "code": code})
-        self.sessions.pop(sess.id, None)
-        try:
-            os.close(sess.fd)
-        except OSError:
-            pass
-        print(f"[sess] exit {sess.id} pid={sess.pid} code={code} (total={len(self.sessions)})", flush=True)
-
-    def attach(self, sess: Session, ws: WebSocket) -> None:
-        """Attach a client and cancel any pending grace-period cleanup."""
-        if sess.cleanup_task:
-            sess.cleanup_task.cancel()
-            sess.cleanup_task = None
-        sess.clients.add(ws)
-
-    def detach(self, ws: WebSocket) -> None:
-        """Drop a client from every session; arm grace timers for orphans."""
-        for sess in list(self.sessions.values()):
-            if ws in sess.clients:
-                sess.clients.discard(ws)
-                if not sess.clients and sess.alive:
-                    sess.cleanup_task = asyncio.create_task(self._grace_kill(sess))
-
-    async def _grace_kill(self, sess: Session) -> None:
-        try:
-            await asyncio.sleep(GRACE_PERIOD)
-        except asyncio.CancelledError:
-            return
-        if not sess.clients and sess.alive:
-            self.kill(sess)
-
-    def kill(self, sess: Session) -> None:
-        print(f"[sess] kill {sess.id} pid={sess.pid}", flush=True)
-        try:
-            os.kill(sess.pid, signal.SIGHUP)
-        except ProcessLookupError:
-            pass
-
-    def shutdown_all(self) -> None:
-        """Force-kill every child process; used on server shutdown."""
-        for sess in list(self.sessions.values()):
-            try:
-                os.kill(sess.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+    Domain events carry their payload as raw ``bytes`` in ``data``; encode
+    that to base64 here so the domain stays ignorant of the wire codec.
+    """
+    if isinstance(event.get("data"), (bytes, bytearray)):
+        event = {**event, "data": b64(event["data"])}
+    return json.dumps(event)
 
 
 manager = SessionManager()
@@ -226,80 +77,91 @@ if os.path.isdir(DIST):
     app.mount("/assets", StaticFiles(directory=os.path.join(DIST, "assets")), name="assets")
 
 
-async def handle_msg(ws: WebSocket, msg: dict) -> None:
+def handle_msg(sub: Subscriber, msg: dict) -> None:
+    """Dispatch one client message; replies are enqueued on ``sub``.
+
+    Outbound messages all flow through the subscriber queue so a single
+    drain task owns ordering on the wire (no interleaving with stdout).
+    """
     mtype = msg.get("type")
     if mtype == "start":
         sess = manager.create(
             msg.get("shell", "bash"), int(msg["cols"]), int(msg["rows"])
         )
-        manager.attach(sess, ws)
-        await ws.send_text(
-            json.dumps(
-                {
-                    "type": "started",
-                    "id": sess.id,
-                    "cid": msg.get("cid"),
-                    "cols": sess.cols,
-                    "rows": sess.rows,
-                }
-            )
+        manager.attach(sess, sub)
+        sub.send(
+            {
+                "type": "started",
+                "id": sess.id,
+                "cid": msg.get("cid"),
+                "cols": sess.cols,
+                "rows": sess.rows,
+            }
         )
         return
 
     sess = manager.sessions.get(msg.get("id"))
     if mtype == "attach":
         if not sess:
-            await ws.send_text(json.dumps({"type": "error", "message": "no such session"}))
+            sub.send({"type": "error", "message": "no such session"})
             return
-        manager.attach(sess, ws)
-        await ws.send_text(
-            json.dumps(
-                {
-                    "type": "replay",
-                    "id": sess.id,
-                    "data": b64(sess.snapshot()),
-                    "cols": sess.cols,
-                    "rows": sess.rows,
-                }
-            )
+        manager.attach(sess, sub)
+        sub.send(
+            {
+                "type": "replay",
+                "id": sess.id,
+                "data": sess.snapshot(),
+                "cols": sess.cols,
+                "rows": sess.rows,
+            }
         )
     elif mtype == "stdin":
-        if sess and sess.alive:
-            try:
-                os.write(sess.fd, unb64(msg["data"]))
-            except OSError:
-                pass  # PTY may have just closed; the broadcast loop will send exit
+        if sess:
+            manager.write(sess, unb64(msg["data"]))
     elif mtype == "resize":
-        if sess and sess.alive:
-            sess.cols, sess.rows = int(msg["cols"]), int(msg["rows"])
-            set_winsize(sess.fd, sess.rows, sess.cols)
+        if sess:
+            manager.resize(sess, int(msg["cols"]), int(msg["rows"]))
     elif mtype == "close":
         if sess:
             manager.kill(sess)
 
 
+async def _drain(ws: WebSocket, sub: Subscriber) -> None:
+    """Pump events from the subscriber queue out over the WebSocket."""
+    while True:
+        event = await sub.get()
+        try:
+            await ws.send_text(to_wire(event))
+        except Exception:
+            break  # connection gone; ws_endpoint handles detach/cleanup
+
+
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
+    sub = Subscriber()
+    drain = asyncio.create_task(_drain(ws, sub))
     try:
         while True:
             try:
                 raw = await ws.receive_text()
                 msg = json.loads(raw)
             except json.JSONDecodeError as e:
-                await ws.send_text(json.dumps({"type": "error", "message": f"bad json: {e}"}))
+                sub.send({"type": "error", "message": f"bad json: {e}"})
                 continue
             try:
-                await handle_msg(ws, msg)
+                handle_msg(sub, msg)
             except Exception as e:
                 # Log and tell the client, but keep the connection alive.
                 print(f"[ws] handle_msg error: {e!r}")
-                await ws.send_text(json.dumps({"type": "error", "message": str(e)}))
+                sub.send({"type": "error", "message": str(e)})
     except WebSocketDisconnect:
-        manager.detach(ws)
+        pass
     except Exception as e:
         print(f"[ws] fatal error: {e!r}")
-        manager.detach(ws)
+    finally:
+        manager.detach(sub)
+        drain.cancel()
 
 
 if __name__ == "__main__":

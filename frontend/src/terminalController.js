@@ -139,12 +139,21 @@ export function newTab() {
 export function mountTab(tabId, mainHost, mirrorHost) {
   if (_terms.has(tabId)) return; // already mounted
 
+  const mono = '"SF Mono", "JetBrains Mono", ui-monospace, "Menlo", monospace';
   const main = new Terminal({
-    theme: { background: "#1e1e1e", foreground: "#ddd" },
+    theme: {
+      background: "#111113",
+      foreground: "#ededef",
+      cursor: "#7c6cff",
+      cursorAccent: "#111113",
+      selectionBackground: "rgba(124, 108, 255, 0.30)",
+    },
+    fontFamily: mono,
     fontSize: 14, cursorBlink: true, allowTransparency: false,
   });
   const mirror = new Terminal({
-    theme: { background: "#15171a", foreground: "#aaa" },
+    theme: { background: "#161619", foreground: "rgba(237, 237, 239, 0.55)" },
+    fontFamily: mono,
     fontSize: 9, cursorBlink: false, disableStdin: true,
   });
 

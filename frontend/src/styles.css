@@ -131,6 +131,31 @@ html, body, #root { height: 100%; margin: 0; }
   border-bottom: 1px solid var(--border);
   flex-shrink: 0;
 }
+
+.view-toggle {
+  display: flex;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 3px;
+  gap: 2px;
+}
+.toggle-btn {
+  background: transparent;
+  color: var(--text-muted);
+  border: none;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease);
+}
+.toggle-btn:hover { color: var(--text); }
+.toggle-btn.active {
+  background: var(--accent);
+  color: #fff;
+}
 .toolbar .title {
   font-weight: 600;
   font-size: 13px;
@@ -181,6 +206,10 @@ html, body, #root { height: 100%; margin: 0; }
   min-height: 0;
   gap: 12px;
   padding: 12px;
+}
+.stage.pipeline-view {
+  padding: 0;
+  gap: 0;
 }
 .main-pane {
   flex: 1;
@@ -254,3 +283,237 @@ html, body, #root { height: 100%; margin: 0; }
 }
 .inputbar button:hover { background: var(--accent-hover); }
 .inputbar button:active { transform: translateY(1px); }
+
+
+/* ── pipeline screen ───────────────────────────────────── */
+.pipeline-screen {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+  gap: 1px; /* Divider between sidebar and main */
+  background: var(--border); /* Divider color */
+}
+
+.pipeline-sidebar {
+  width: 320px;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 12px;
+}
+.sidebar-header {
+  font-family: var(--mono);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+}
+.dsl-editor {
+  flex: 1;
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+  resize: none;
+  outline: none;
+}
+.dsl-editor:focus { border-color: var(--accent); }
+.btn-run {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 200ms ease;
+}
+.btn-run:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.pipeline-main {
+  flex: 1;
+  background: var(--bg);
+  padding: 24px;
+  overflow-y: auto;
+}
+
+/* ── nodes ─────────────────────────────────────────────── */
+.node-container {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  padding: 12px;
+  margin-bottom: 12px;
+  position: relative;
+}
+.node-container.batch {
+  border-color: var(--border-strong);
+  background: var(--surface-2);
+}
+.node-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 8px;
+}
+.node-children {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.node-container.terminal {
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.terminal-id {
+  font-weight: 600;
+  font-size: 13px;
+}
+.terminal-argv {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.terminal-status-dot {
+  position: absolute;
+  top: 12px; right: 12px;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  background: var(--text-faint);
+}
+.terminal-status-dot.pending { background: var(--text-faint); }
+
+/* Live status overrides */
+.node-container.live { cursor: default; transition: border-color 150ms ease; }
+.node-container.live.status-running { border-color: var(--accent); }
+.node-container.live.status-waiting { border-color: var(--warn); }
+.node-container.live.status-finished { border-color: var(--success); }
+.node-container.live.status-running .terminal-status-dot { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+.node-container.live.status-waiting .terminal-status-dot { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
+.node-container.live.status-finished .terminal-status-dot { background: var(--success); }
+.terminal-status-text { font-size: 11px; font-weight: 600; text-transform: capitalize; color: var(--text-muted); }
+
+/* ── node terminal head & xterm host ───────────────────── */
+.node-term-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+.node-term-head .terminal-id { font-size: 12px; font-weight: 600; color: var(--text); }
+
+.hitl-hint {
+  margin-left: auto;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--warn);
+  background: rgba(234, 179, 8, 0.12);
+  border: 1px solid rgba(234, 179, 8, 0.35);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
+.node-term-host {
+  flex: 1;
+  min-height: 160px;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #0e0e10;
+}
+
+/* Make the job grid a single column so each node has room for its terminal */
+.job-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* ── live tree ──────────────────────────────────────────────────────────── */
+/* Outer wrapper inside pipeline-main for the running pipeline */
+.pipeline-result {
+  padding: 10px 16px;
+  border-top: 1px solid #2a2a3a;
+  flex-shrink: 0;
+}
+.pipeline-result .result-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #888;
+  margin-bottom: 6px;
+}
+.pipeline-result .result-data {
+  margin: 0;
+  padding: 10px;
+  background: #0d0d14;
+  border-radius: 6px;
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-x: auto;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.live-tree {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* Sequence wrapper — children stack vertically (series execution) */
+.live-flow.series {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* Thin connector line drawn between consecutive sequence steps */
+.series-connector {
+  align-self: center;
+  width: 2px;
+  height: 18px;
+  background: var(--border);
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+/* Override .node-children inside the live batch row to prevent wrapping and
+   keep cards in a single horizontal row even when there are many of them. */
+.node-children.parallel {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  padding-bottom: 4px; /* room for scrollbar */
+  align-items: stretch; /* equal-height cards */
+}
+
+/* Each terminal leaf card inside a parallel batch row gets a minimum width
+   so its xterm has room, but can grow to fill available space evenly. */
+.node-children.parallel > .node-container.terminal {
+  min-width: 280px;
+  flex: 1 1 280px;
+}
+
+/* Pulse animation for waiting nodes */
+@keyframes pulse-border {
+  0%, 100% { border-color: var(--warn); box-shadow: 0 0 0 0 rgba(234,179,8,0); }
+  50%       { border-color: var(--warn); box-shadow: 0 0 0 4px rgba(234,179,8,0.25); }
+}
+.node-container.live.pulse {
+  animation: pulse-border 1.6s ease-in-out infinite;
+}

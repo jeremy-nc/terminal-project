@@ -21,9 +21,10 @@ class SessionManager:
         self.sessions = {}
         self.loop = None
 
-    def create(self, shell_name: str, cols: int, rows: int) -> Session:
+    def create(self, shell_name: str = None, cols: int = 80, rows: int = 24, argv: list = None) -> Session:
         sid = uuid.uuid4().hex[:8]
-        argv = resolve_shell(shell_name)
+        if not argv:
+            argv = resolve_shell(shell_name or "bash")
         pid, fd = pty.fork()
         if pid == 0:  # child
             env = os.environ.copy()

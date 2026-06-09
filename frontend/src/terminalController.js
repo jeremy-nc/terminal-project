@@ -16,9 +16,13 @@ let _state = {
   status: "connecting", // "connecting" | "open" | "closed"
   tabs: [],             // [{ id, title, sessionId, status }]
   activeTabId: null,
+  pipelines: [],        // [{ id, status, spec, statusById, sessionById, result }]
 };
 
 let _tabCounter = 0;
+// Spec submitted by the most recent runPipeline(), attached to the pipeline
+// entry when the server confirms with "pipeline_started".
+let _pendingSpec = null;
 
 // ── internal registries ──────────────────────────────────────────────────────
 const _terms = new Map();    // tabId → { main: Terminal, mirror: Terminal, mainFit, mirrorFit }
@@ -103,12 +107,88 @@ function _handleMsg(msg) {
       if (!rec) return;
       const data = b64dec(msg.data);
       rec.main.write(data);
-      rec.mirror.write(data);
+      rec.mirror?.write(data);
       break;
     }
     case "exit": {
       const tabId = _bySession.get(msg.id);
       if (tabId) _patchTab(tabId, { status: "exited" });
+      break;
+    }
+    case "pipeline_started": {
+      // Attach the spec submitted by runPipeline() so the live view can render
+      // the same hierarchical tree as the preview. Status/session are keyed by
+      // each node's spec id (node_id), filled in as node events arrive.
+      _setState({
+        pipelines: [
+          ..._state.pipelines,
+          {
+            id: Date.now(),
+            status: "running",
+            spec: _pendingSpec,
+            statusById: {},
+            sessionById: {},
+            result: null,
+          },
+        ],
+      });
+      break;
+    }
+    case "pipeline_finished": {
+      _setState({
+        pipelines: _state.pipelines.map((p) =>
+          p.status === "running" ? { ...p, status: "finished", result: msg.result } : p
+        ),
+      });
+      break;
+    }
+    case "node_started": {
+      // Only terminal (leaf) nodes own a live session; batch/sequence wrappers
+      // are drawn from the spec tree, not from events.
+      if (msg.node_type === "terminal") {
+        const nodeId = msg.node_id;
+        const tabId = `node-${nodeId}`;
+        if (!_state.tabs.find(t => t.id === tabId)) {
+          const tab = { id: tabId, title: `Job ${nodeId}`, sessionId: msg.id, status: "running", isNode: true };
+          _bySession.set(msg.id, tabId);
+          _setState({
+            tabs: [..._state.tabs, tab],
+            pipelines: _state.pipelines.map(p =>
+              p.status === "running"
+                ? {
+                    ...p,
+                    statusById: { ...p.statusById, [nodeId]: "running" },
+                    sessionById: { ...p.sessionById, [nodeId]: msg.id },
+                  }
+                : p
+            ),
+          });
+        }
+      }
+      break;
+    }
+    case "node_finished": {
+      // Wrapper (batch/sequence) finishes carry no node_id; ignore those here.
+      if (msg.node_id == null) break;
+      _setState({
+        pipelines: _state.pipelines.map(p => ({
+          ...p,
+          statusById: { ...p.statusById, [msg.node_id]: "finished" },
+        })),
+      });
+      break;
+    }
+    case "needs_input": {
+      const tabId = _bySession.get(msg.id);
+      if (tabId) _patchTab(tabId, { needsInput: true });
+      if (msg.node_id != null) {
+        _setState({
+          pipelines: _state.pipelines.map(p => ({
+            ...p,
+            statusById: { ...p.statusById, [msg.node_id]: "waiting" },
+          })),
+        });
+      }
       break;
     }
     case "error":
@@ -188,8 +268,57 @@ export function unmountTab(tabId) {
   const rec = _terms.get(tabId);
   if (!rec) return;
   rec.main.dispose();
-  rec.mirror.dispose();
+  rec.mirror?.dispose();
   _terms.delete(tabId);
+}
+
+/**
+ * Mount a single live xterm for a backend-owned pipeline node session.
+ * Unlike mountTab there is no mirror view: the node box in the dashboard is
+ * itself the live terminal. The session already exists server-side (created by
+ * the PipelineEngine), so we attach to it for replay + live output rather than
+ * sending a "start".
+ */
+export function mountNodeTerm(tabId, host) {
+  if (_terms.has(tabId)) { fitTab(tabId); return; } // already mounted
+  const tab = _state.tabs.find((t) => t.id === tabId);
+  if (!tab) return;
+
+  const mono = '"SF Mono", "JetBrains Mono", ui-monospace, "Menlo", monospace';
+  const main = new Terminal({
+    theme: {
+      background: "#0e0e10",
+      foreground: "#ededef",
+      cursor: "#7c6cff",
+      cursorAccent: "#0e0e10",
+      selectionBackground: "rgba(124, 108, 255, 0.30)",
+    },
+    fontFamily: mono,
+    fontSize: 12, cursorBlink: true,
+  });
+  const mainFit = new FitAddon();
+  main.loadAddon(mainFit);
+  main.open(host);
+
+  main.onData((data) => {
+    const t = _state.tabs.find((x) => x.id === tabId);
+    if (t?.sessionId) _send({ type: "stdin", id: t.sessionId, data: strToB64(data) });
+  });
+
+  // Register before attaching so replay/stdout has a terminal to write to.
+  _terms.set(tabId, { main, mirror: null, mainFit, mirrorFit: null });
+
+  if (tab.sessionId) _send({ type: "attach", id: tab.sessionId });
+  fitTab(tabId);
+  requestAnimationFrame(() => fitTab(tabId));
+}
+
+
+export function runPipeline(spec) {
+  // Remember the spec so the live view can render its tree once the server
+  // confirms with "pipeline_started".
+  _pendingSpec = spec;
+  _send({ type: "run_pipeline", pipeline: spec });
 }
 
 export function activateTab(tabId) {
@@ -238,7 +367,7 @@ export function fitTab(tabId) {
   if (!rec) return;
   try {
     rec.mainFit.fit();
-    rec.mirrorFit.fit();
+    rec.mirrorFit?.fit();
     const tab = _state.tabs.find((t) => t.id === tabId);
     if (tab?.sessionId && tab.status === "running") {
       _send({ type: "resize", id: tab.sessionId, cols: rec.main.cols, rows: rec.main.rows });

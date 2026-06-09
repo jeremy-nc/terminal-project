@@ -22,6 +22,7 @@ import asyncio
 import base64
 import json
 import os
+from typing import Any
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -29,7 +30,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from terminal import SessionManager, Subscriber
+from terminal import SessionManager, Subscriber, build_node_tree, PipelineEngine
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "frontend", "dist")
@@ -43,15 +44,20 @@ def unb64(data: str) -> bytes:
     return base64.b64decode(data.encode("ascii"))
 
 
-def to_wire(event: dict) -> str:
-    """Serialise a domain/transport event to the JSON wire format.
+def to_wire(event: Any) -> Any:
+    """Recursively encode bytes/bytearrays to base64 for the wire."""
+    if isinstance(event, (bytes, bytearray)):
+        return b64(event)
+    if isinstance(event, dict):
+        return {k: to_wire(v) for k, v in event.items()}
+    if isinstance(event, list):
+        return [to_wire(v) for v in event]
+    return event
 
-    Domain events carry their payload as raw ``bytes`` in ``data``; encode
-    that to base64 here so the domain stays ignorant of the wire codec.
-    """
-    if isinstance(event.get("data"), (bytes, bytearray)):
-        event = {**event, "data": b64(event["data"])}
-    return json.dumps(event)
+
+def to_wire_json(event: dict) -> str:
+    """Serialise a domain/transport event to the JSON wire format."""
+    return json.dumps(to_wire(event))
 
 
 manager = SessionManager()
@@ -78,11 +84,7 @@ if os.path.isdir(DIST):
 
 
 def handle_msg(sub: Subscriber, msg: dict) -> None:
-    """Dispatch one client message; replies are enqueued on ``sub``.
-
-    Outbound messages all flow through the subscriber queue so a single
-    drain task owns ordering on the wire (no interleaving with stdout).
-    """
+    """Dispatch one client message; replies are enqueued on ``sub``."""
     mtype = msg.get("type")
     if mtype == "start":
         sess = manager.create(
@@ -98,6 +100,19 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
                 "rows": sess.rows,
             }
         )
+        return
+
+    if mtype == "run_pipeline":
+        spec = msg.get("pipeline")
+        if not spec:
+            sub.send({"type": "error", "message": "missing pipeline spec"})
+            return
+        try:
+            root = build_node_tree(spec, manager, sub)
+            engine = PipelineEngine(root, sub)
+            asyncio.create_task(engine.execute(msg.get("input")))
+        except Exception as e:
+            sub.send({"type": "error", "message": f"failed to build pipeline: {e}"})
         return
 
     sess = manager.sessions.get(msg.get("id"))
@@ -131,7 +146,7 @@ async def _drain(ws: WebSocket, sub: Subscriber) -> None:
     while True:
         event = await sub.get()
         try:
-            await ws.send_text(to_wire(event))
+            await ws.send_text(to_wire_json(event))
         except Exception:
             break  # connection gone; ws_endpoint handles detach/cleanup
 

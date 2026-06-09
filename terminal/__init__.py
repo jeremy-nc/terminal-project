@@ -7,5 +7,6 @@ Public API:
 """
 from .manager import SessionManager
 from .session import Session, Subscriber
+from .coordinator import build_node_tree, PipelineEngine
 
-__all__ = ["SessionManager", "Session", "Subscriber"]
+__all__ = ["SessionManager", "Session", "Subscriber", "build_node_tree", "PipelineEngine"]

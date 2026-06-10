@@ -86,6 +86,23 @@ function _connect() {
   };
 }
 
+// Does this spec node's subtree contain nodeId? (fan-out children are minted
+// at runtime as `${parent.id}/${i}`, so match that prefix too.)
+function _subtreeHasNode(node, nodeId) {
+  if (!node) return false;
+  if (node.id === nodeId) return true;
+  if (typeof nodeId === "string" && typeof node.id === "string" && nodeId.startsWith(node.id + "/")) return true;
+  return Array.isArray(node.nodes) && node.nodes.some((c) => _subtreeHasNode(c, nodeId));
+}
+
+// The top-level pipeline stage (root sequence's direct child) that contains a
+// node — the "container" the view scrolls to when that stage starts running.
+function _stageContaining(spec, nodeId) {
+  if (!spec || spec.type !== "sequence" || !Array.isArray(spec.nodes)) return null;
+  const stage = spec.nodes.find((s) => _subtreeHasNode(s, nodeId));
+  return stage ? stage.id : null;
+}
+
 function _handleMsg(msg) {
   switch (msg.type) {
     case "started": {
@@ -142,6 +159,7 @@ function _handleMsg(msg) {
             warnings: [],
             error: null,
             result: null,
+            currentStage: null,
           },
         ],
       });
@@ -208,6 +226,10 @@ function _handleMsg(msg) {
                           ],
                         }
                       : (p.childrenByParent || {}),
+                    // Top-level stage of the just-started node. Only changes
+                    // when a new container lights up, so the view scrolls to it
+                    // once and then leaves the user alone until the next stage.
+                    currentStage: _stageContaining(p.spec, nodeId) || p.currentStage,
                   }
                 : p
             ),

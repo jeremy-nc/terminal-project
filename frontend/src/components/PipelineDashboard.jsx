@@ -54,6 +54,16 @@ export default function PipelineDashboard({ pipelines, tabs }) {
     }
   }, [specText]);
 
+  // Follow the action: scroll the live tree to a stage's container the first
+  // time one of its terminals starts. currentStage only changes per container,
+  // so this fires once per stage and the user can scroll freely in between.
+  useEffect(() => {
+    const stage = active?.currentStage;
+    if (!stage) return;
+    const el = document.getElementById(`pl-node-${stage}`);
+    if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [active?.currentStage]);
+
   const handleRun = () => {
     if (preview) runPipeline(preview);
   };
@@ -100,7 +110,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
   const renderLiveNodeTree = (node) => {
     if (node.type === "sequence") {
       return (
-        <div key={node.id} className="live-flow series">
+        <div key={node.id} id={`pl-node-${node.id}`} className="live-flow series">
           {node.nodes.map((child, i) => (
             <React.Fragment key={child.id}>
               {i > 0 && <div className="series-connector" />}
@@ -113,7 +123,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
 
     if (node.type === "batch") {
       return (
-        <div key={node.id} className="node-container batch live">
+        <div key={node.id} id={`pl-node-${node.id}`} className="node-container batch live">
           <div className="node-label">Batch · parallel</div>
           <div className="node-children parallel">
             {node.nodes.map(child => renderLiveNodeTree(child))}
@@ -128,7 +138,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
       const kids = active.childrenByParent?.[node.id] || [];
       const label = node.type === "dynamic_batch" ? "Dynamic Batch · fan-out" : "Fan-out · parallel";
       return (
-        <div key={node.id} className="node-container batch live">
+        <div key={node.id} id={`pl-node-${node.id}`} className="node-container batch live">
           <div className="node-label">{label}</div>
           <div className="node-children parallel">
             {kids.length === 0
@@ -163,6 +173,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
     return (
       <div
         key={node.id}
+        id={`pl-node-${node.id}`}
         className={`node-container terminal live status-${status} ${status === 'waiting' ? 'pulse' : ''}`}
       >
         <div className="node-term-head">

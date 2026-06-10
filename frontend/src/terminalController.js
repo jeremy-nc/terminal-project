@@ -116,10 +116,18 @@ function _handleMsg(msg) {
       break;
     }
     case "pipeline_started": {
+      // Re-runs reuse node ids (n1/0, n1/1, …), so the previous run's node
+      // tabs must be cleared — otherwise node_started sees the tab already
+      // exists, skips registration, and the new run's children never render.
+      _state.tabs.forEach((t) => {
+        if (t.isNode && t.sessionId) _bySession.delete(t.sessionId);
+      });
+      const keptTabs = _state.tabs.filter((t) => !t.isNode);
       // Attach the spec submitted by runPipeline() so the live view can render
       // the same hierarchical tree as the preview. Status/session are keyed by
       // each node's spec id (node_id), filled in as node events arrive.
       _setState({
+        tabs: keptTabs,
         pipelines: [
           ..._state.pipelines,
           {

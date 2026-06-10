@@ -149,12 +149,30 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             return
         try:
             root = build_node_tree(spec, manager, sub)
-            engine = PipelineEngine(root, sub)
-            # Track the task on the subscriber so a "cancel_pipeline" message can
-            # cancel it (which kills any in-flight child PTYs via TerminalNode).
-            sub.pipeline_task = asyncio.create_task(engine.execute(msg.get("input")))
         except Exception as e:
             sub.send({"type": "error", "message": f"failed to build pipeline: {e}"})
+            return
+
+        initial_input = msg.get("input")
+        previous = getattr(sub, "pipeline_task", None)
+
+        async def _run():
+            # Cancel any still-running pipeline first so a re-run doesn't leave
+            # orphaned PTYs (e.g. an interactive claude) alive in the background.
+            # Await its teardown before starting the new run — this also ensures
+            # the old run's "pipeline_error" is flushed before the new run's
+            # "pipeline_started", so cancellation can't mis-mark the new run.
+            if previous and not previous.done():
+                previous.cancel()
+                try:
+                    await previous
+                except (asyncio.CancelledError, Exception):
+                    pass
+            await PipelineEngine(root, sub).execute(initial_input)
+
+        # Track the task on the subscriber so "cancel_pipeline" (and the next
+        # run) can cancel it, killing in-flight child PTYs via TerminalNode.
+        sub.pipeline_task = asyncio.create_task(_run())
         return
 
     if mtype == "cancel_pipeline":

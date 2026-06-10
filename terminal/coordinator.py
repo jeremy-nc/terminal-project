@@ -132,12 +132,16 @@ class TerminalNode(Node):
         cwd: str = None,
         parent_id: Any = None,
         internal: bool = False,
+        outputs: dict = None,
     ):
         self.manager = manager
         self.argv_template = argv_template
         self.cols = cols
         self.rows = rows
         self.event_bus = event_bus
+        # Shared, coordinator-owned map (node_id -> result) collected as nodes
+        # finish, so the whole pipeline's outputs survive to pipeline_finished.
+        self.outputs = outputs
         # Spec id from the DSL, echoed back in events so the client can overlay
         # live status/session onto the correct node in the pipeline tree.
         self.node_id = node_id
@@ -190,14 +194,23 @@ class TerminalNode(Node):
             raise
 
         result = {"output": output, "exit_code": code}
+        # Record into the coordinator's map (skip internal plumbing like the
+        # structurer). No race: captured in-process the moment we finish.
+        if self.outputs is not None and not self.internal and self.node_id is not None:
+            self.outputs[self.node_id] = result
         if self.event_bus:
-            self.event_bus.send({
+            finished = {
                 "type": "node_finished",
                 "id": sess.id,
                 "node_id": self.node_id,
                 "parent_id": self.parent_id,
-                "exit_code": code
-            })
+                "exit_code": code,
+            }
+            # Carry the captured output so the client can fill its per-node view
+            # as each node finishes (skip internal plumbing like the structurer).
+            if not self.internal:
+                finished["output"] = output
+            self.event_bus.send(finished)
         return result
 
 
@@ -275,6 +288,7 @@ class FanOutNode(Node):
         cwd: str = None,
         cap: int = DEFAULT_FANOUT_CAP,
         count: Optional[int] = None,
+        outputs: dict = None,
     ):
         self.manager = manager
         self.argv_template = argv_template
@@ -283,6 +297,7 @@ class FanOutNode(Node):
         self.event_bus = event_bus
         self.node_id = node_id
         self.cwd = cwd
+        self.outputs = outputs
         self.cap = cap if cap and cap > 0 else DEFAULT_FANOUT_CAP
         # Authored count (e.g. dyn_batch(8): ...) -> broadcast the input to N
         # identical children. None -> derive the children from the input list.
@@ -327,6 +342,7 @@ class FanOutNode(Node):
                 node_id=f"{self.node_id}/{index}",
                 cwd=self.cwd,
                 parent_id=self.node_id,
+                outputs=self.outputs,
             )
             async with sem:
                 try:
@@ -488,15 +504,21 @@ class DynamicBatchNode(Node):
 class PipelineEngine:
     """Entry point for running a composed pipeline and watching its progress."""
 
-    def __init__(self, root_node: Node, sub: Subscriber):
+    def __init__(self, root_node: Node, sub: Subscriber, outputs: dict = None):
         self.root_node = root_node
         self.sub = sub
+        # Coordinator-owned map of every leaf node's output, keyed by node_id.
+        self.outputs = outputs if outputs is not None else {}
 
     async def execute(self, initial_input: Any = None):
         self.sub.send({"type": "pipeline_started"})
         try:
             result = await self.root_node.run(initial_input)
-            self.sub.send({"type": "pipeline_finished", "result": result})
+            self.sub.send({
+                "type": "pipeline_finished",
+                "result": result,
+                "outputs": self.outputs,
+            })
             return result
         except asyncio.CancelledError:
             self.sub.send({"type": "pipeline_error", "message": "Pipeline cancelled"})
@@ -524,6 +546,7 @@ def build_node_tree(
     manager: SessionManager,
     event_bus: Subscriber,
     _global_cwd: str = None,
+    outputs: dict = None,
 ) -> Node:
     """Recursively build a Node tree from a JSON-serializable spec.
 
@@ -551,6 +574,7 @@ def build_node_tree(
             event_bus=event_bus,
             node_id=spec.get("id"),
             cwd=resolved,
+            outputs=outputs,
         )
     elif ntype == "fanout":
         raw_cwd = spec.get("cwd")
@@ -565,6 +589,7 @@ def build_node_tree(
             cwd=resolved,
             cap=spec.get("cap", DEFAULT_FANOUT_CAP),
             count=spec.get("count"),
+            outputs=outputs,
         )
     elif ntype == "dynamic_batch":
         raw_cwd = spec.get("cwd")
@@ -579,6 +604,7 @@ def build_node_tree(
             node_id=node_id,
             cwd=resolved,
             cap=spec.get("cap", DEFAULT_FANOUT_CAP),
+            outputs=outputs,
         )
         structurer = TerminalStructurer(
             manager=manager,
@@ -590,10 +616,10 @@ def build_node_tree(
         )
         return DynamicBatchNode(fanout, structurer, event_bus=event_bus, node_id=node_id)
     elif ntype == "batch":
-        nodes = [build_node_tree(n, manager, event_bus, _global_cwd) for n in spec["nodes"]]
+        nodes = [build_node_tree(n, manager, event_bus, _global_cwd, outputs) for n in spec["nodes"]]
         return BatchNode(nodes, concurrency=spec.get("concurrency"), event_bus=event_bus)
     elif ntype == "sequence":
-        nodes = [build_node_tree(n, manager, event_bus, _global_cwd) for n in spec["nodes"]]
+        nodes = [build_node_tree(n, manager, event_bus, _global_cwd, outputs) for n in spec["nodes"]]
         return SequenceNode(nodes, event_bus=event_bus)
     else:
         raise ValueError(f"Unknown node type: {ntype}")

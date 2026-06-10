@@ -148,9 +148,12 @@ function _handleMsg(msg) {
       break;
     }
     case "pipeline_finished": {
+      // msg.outputs is the coordinator's full map: { node_id: {output(b64), exit_code} }
       _setState({
         pipelines: _state.pipelines.map((p) =>
-          p.status === "running" ? { ...p, status: "finished", result: msg.result } : p
+          p.status === "running"
+            ? { ...p, status: "finished", result: msg.result, outputs: msg.outputs || {} }
+            : p
         ),
       });
       break;
@@ -217,10 +220,19 @@ function _handleMsg(msg) {
       // Wrapper (batch/sequence) finishes carry no node_id; ignore those here.
       if (msg.node_id == null) break;
       _setState({
-        pipelines: _state.pipelines.map(p => ({
-          ...p,
-          statusById: { ...p.statusById, [msg.node_id]: "finished" },
-        })),
+        pipelines: _state.pipelines.map(p =>
+          p.status === "running"
+            ? {
+                ...p,
+                statusById: { ...p.statusById, [msg.node_id]: "finished" },
+                // Fill the per-node output view incrementally; wrappers and
+                // internal nodes don't carry an output.
+                outputs: msg.output != null
+                  ? { ...(p.outputs || {}), [msg.node_id]: { output: msg.output, exit_code: msg.exit_code } }
+                  : (p.outputs || {}),
+              }
+            : p
+        ),
       });
       break;
     }
@@ -248,6 +260,9 @@ function _sendStart(tabId) {
   const rec = _terms.get(tabId);
   const cols = rec ? rec.main.cols : 80;
   const rows = rec ? rec.main.rows : 24;
+  // Record the dims we started at so fitTab won't send a redundant resize
+  // (which would SIGWINCH the shell into reprinting its prompt).
+  if (rec) { rec._lastCols = cols; rec._lastRows = rows; }
   // cid lets the server echo back which tab this session belongs to.
   _send({ type: "start", shell: "bash", cols, rows, cid: tabId });
 }
@@ -302,10 +317,13 @@ export function mountTab(tabId, mainHost, mirrorHost) {
   // shown host must never prevent the session from starting.
   _terms.set(tabId, { main, mirror, mainFit, mirrorFit });
 
-  // Start immediately so the tab is not gated on layout; the PTY accepts
-  // a later resize. Fit now (best-effort) and again after the next paint.
-  if (_ws?.readyState === WebSocket.OPEN) _sendStart(tabId);
+  // Fit BEFORE starting so the PTY is created at its final size. Otherwise the
+  // shell prints a prompt at 80x24, then the post-start resize fires SIGWINCH
+  // and it reprints — the doubled prompt. (fitTab won't send a resize here:
+  // the tab isn't "running" yet.) Re-fit after paint to correct any pre-layout
+  // miscalc; the resize guard makes that a no-op if the size is unchanged.
   fitTab(tabId);
+  if (_ws?.readyState === WebSocket.OPEN) _sendStart(tabId);
   requestAnimationFrame(() => fitTab(tabId));
 }
 
@@ -420,21 +438,59 @@ export function sendStdin(data) {
   }
 }
 
+/**
+ * Keep the mirror as a faithful read-only copy: give it the SAME grid
+ * (cols/rows) as the main terminal so cursor-addressing escapes render
+ * identically (no smearing on resize), then CSS-scale the whole element down
+ * to fit the narrow mirror pane. Scaling (not re-fitting to a different width)
+ * is what makes it corruption-proof.
+ */
+function _syncMirror(rec) {
+  if (!rec.mirror) return;
+  if (rec.mirror.cols !== rec.main.cols || rec.mirror.rows !== rec.main.rows) {
+    try { rec.mirror.resize(rec.main.cols, rec.main.rows); } catch (_) {}
+  }
+  const el = rec.mirror.element;
+  const host = el && el.parentElement;
+  if (!el || !host) return;
+  el.style.transformOrigin = "top left";
+  el.style.transform = "none";          // reset to measure natural width
+  const naturalW = el.offsetWidth || 1;
+  const avail = host.clientWidth || naturalW;
+  el.style.transform = `scale(${Math.min(1, avail / naturalW)})`;
+}
+
 export function fitTab(tabId) {
   const rec = _terms.get(tabId);
   if (!rec) return;
   try {
     rec.mainFit.fit();
-    rec.mirrorFit?.fit();
+    _syncMirror(rec);
     const tab = _state.tabs.find((t) => t.id === tabId);
     if (tab?.sessionId && tab.status === "running") {
-      _send({ type: "resize", id: tab.sessionId, cols: rec.main.cols, rows: rec.main.rows });
+      const { cols, rows } = rec.main;
+      // Only resize when the geometry actually changed: a redundant resize
+      // still fires SIGWINCH, which makes the shell reprint its prompt
+      // (the duplicate-prompt artifact, most visible in the mirror).
+      if (rec._lastCols !== cols || rec._lastRows !== rows) {
+        rec._lastCols = cols;
+        rec._lastRows = rows;
+        _send({ type: "resize", id: tab.sessionId, cols, rows });
+      }
     }
   } catch (_) {}
 }
 
 export function fitActive() {
   if (_state.activeTabId) fitTab(_state.activeTabId);
+}
+
+/** Refit every mounted pipeline node terminal — used when the pipeline view
+ *  becomes visible again after being display:none. */
+export function refitNodes() {
+  for (const tabId of _terms.keys()) {
+    if (tabId.startsWith("node-")) fitTab(tabId);
+  }
 }
 
 // ── useSyncExternalStore API ─────────────────────────────────────────────────

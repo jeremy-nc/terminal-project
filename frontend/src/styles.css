@@ -211,6 +211,22 @@ html, body, #root { height: 100%; margin: 0; }
   padding: 0;
   gap: 0;
 }
+/* Wraps the main + mirror panes; kept mounted and toggled via inline display
+   so terminals aren't destroyed when switching to the pipeline view. */
+.terminal-view {
+  flex: 1;
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+}
+/* Same idea for the pipeline view — kept mounted so its node terminals survive
+   the switch. Fills the stage so the inner .pipeline-screen (flex:1) lays out. */
+.pipeline-view-wrap {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
 .main-pane {
   flex: 1;
   min-width: 0;
@@ -240,8 +256,9 @@ html, body, #root { height: 100%; margin: 0; }
   flex-shrink: 0;
 }
 
-/* term-host: fills its pane; hidden when tab not active */
-.term-host { width: 100%; height: 100%; }
+/* term-host: fills its pane; hidden when tab not active. overflow:hidden clips
+   the mirror's scaled-down xterm (its layout box keeps the natural width). */
+.term-host { width: 100%; height: 100%; overflow: hidden; }
 .term-host.hidden { display: none; }
 
 /* ── input bar ───────────────────────────────────────────── */
@@ -340,6 +357,52 @@ html, body, #root { height: 100%; margin: 0; }
   min-width: 0; /* allow shrink so wide xterm content can't widen the page */
   background: var(--bg);
   padding: 24px;
+  overflow-y: auto;
+}
+
+/* Right-hand panel mirroring the spec sidebar — shows each node's captured
+   output (from pipeline_finished.outputs). */
+.pipeline-outputs {
+  width: 340px;
+  flex-shrink: 0;
+  background: var(--surface);
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  gap: 12px;
+  overflow-y: auto;
+}
+.outputs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.output-item {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  padding: 8px 10px;
+}
+.output-node-id {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.output-exit { color: var(--text-faint); font-weight: 400; }
+.output-text {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-muted);
+  max-height: 220px;
   overflow-y: auto;
 }
 

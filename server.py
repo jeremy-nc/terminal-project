@@ -147,8 +147,12 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         if cwd_error:
             sub.send({"type": "error", "message": cwd_error})
             return
+        # Coordinator-owned map of every leaf node's output (node_id -> result),
+        # collected as nodes finish and sent back in pipeline_finished. Lives for
+        # this run only — a fresh dict per pipeline, GC'd when the task ends.
+        node_outputs = {}
         try:
-            root = build_node_tree(spec, manager, sub)
+            root = build_node_tree(spec, manager, sub, outputs=node_outputs)
         except Exception as e:
             sub.send({"type": "error", "message": f"failed to build pipeline: {e}"})
             return
@@ -168,7 +172,7 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
                     await previous
                 except (asyncio.CancelledError, Exception):
                     pass
-            await PipelineEngine(root, sub).execute(initial_input)
+            await PipelineEngine(root, sub, outputs=node_outputs).execute(initial_input)
 
         # Track the task on the subscriber so "cancel_pipeline" (and the next
         # run) can cancel it, killing in-flight child PTYs via TerminalNode.

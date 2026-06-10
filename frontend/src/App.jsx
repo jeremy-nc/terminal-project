@@ -1,7 +1,7 @@
 import React, { useSyncExternalStore, useEffect, useState } from "react";
 import {
   subscribe, getSnapshot,
-  newTab, activateTab, closeTab, restartTab, fitActive,
+  newTab, activateTab, closeTab, restartTab, fitActive, refitNodes,
 } from "./terminalController.js";
 import TabBar from "./components/TabBar.jsx";
 import TabStage from "./components/TabStage.jsx";
@@ -29,6 +29,13 @@ export default function App() {
     window.addEventListener("resize", fitActive);
     return () => window.removeEventListener("resize", fitActive);
   }, []);
+
+  // Both views are kept mounted (hidden via display:none), so on switching
+  // back, recompute the now-visible terminals' sizes once laid out.
+  useEffect(() => {
+    if (view === "terminal") requestAnimationFrame(fitActive);
+    else requestAnimationFrame(refitNodes);
+  }, [view]);
 
   const visibleTabs = tabs.filter(t => !t.isNode || activeTabId === t.id);
 
@@ -71,28 +78,37 @@ export default function App() {
       )}
 
       <div className={`stage ${view === "pipeline" ? "pipeline-view" : ""}`}>
-        {view === "pipeline" ? (
+        {/* Both views stay mounted and toggle via display:none so neither's
+            xterm instances (or PTY sessions) are disposed on switch — unmounting
+            respawns shells and refits cold, which renders garbled. */}
+        <div
+          className="pipeline-view-wrap"
+          style={{ display: view === "pipeline" ? "flex" : "none" }}
+        >
           <PipelineDashboard pipelines={pipelines} tabs={tabs} />
-        ) : (
-          <>
-            <div className="main-pane">
-              {tabs.map((tab) => (
-                <TabStage key={tab.id} tab={tab} active={tab.id === activeTabId} />
-              ))}
-            </div>
-            <div className="mirror-pane">
-              <div className="mirror-label">Mirror (read-only)</div>
-              {tabs.map((tab) => (
-                <TabStage
-                  key={tab.id}
-                  tab={tab}
-                  active={tab.id === activeTabId}
-                  isMirror
-                />
-              ))}
-            </div>
-          </>
-        )}
+        </div>
+
+        <div
+          className="terminal-view"
+          style={{ display: view === "terminal" ? "flex" : "none" }}
+        >
+          <div className="main-pane">
+            {tabs.map((tab) => (
+              <TabStage key={tab.id} tab={tab} active={tab.id === activeTabId} />
+            ))}
+          </div>
+          <div className="mirror-pane">
+            <div className="mirror-label">Mirror (read-only)</div>
+            {tabs.map((tab) => (
+              <TabStage
+                key={tab.id}
+                tab={tab}
+                active={tab.id === activeTabId}
+                isMirror
+              />
+            ))}
+          </div>
+        </div>
       </div>
 
       <InputBar />

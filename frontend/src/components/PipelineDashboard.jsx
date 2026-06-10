@@ -232,6 +232,33 @@ export default function PipelineDashboard({ pipelines, tabs }) {
           </div>
         )}
       </div>
+
+      <div className="pipeline-outputs">
+        <div className="sidebar-header">Node Outputs</div>
+        <div className="outputs-list">
+          {active && active.outputs && Object.keys(active.outputs).length > 0 ? (
+            Object.entries(active.outputs)
+              .sort(([a], [b]) => a.localeCompare(b))
+              .map(([nodeId, res]) => (
+                <div key={nodeId} className="output-item">
+                  <div className="output-node-id">
+                    <span>{nodeId}</span>
+                    {res.exit_code != null && (
+                      <span className="output-exit">exit {res.exit_code}</span>
+                    )}
+                  </div>
+                  <pre className="output-text">{decodeOne(res)}</pre>
+                </div>
+              ))
+          ) : (
+            <div className="text-faint">
+              {active && active.status === "running"
+                ? "Outputs appear as each node finishes…"
+                : "Run a pipeline to see each node's output."}
+            </div>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

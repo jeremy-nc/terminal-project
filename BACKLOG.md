@@ -42,6 +42,47 @@ seq: bash -c "echo Final: {{input}}"
 - Multi-turn / interactive agent support (needs_input flow)?
 
 
+### Markdown Editor with Session-Scoped Refinement
+A markdown editing surface where each document is tied to a Claude session, so
+the user can iteratively refine specific sections by selecting text and
+instructing the LLM.
+
+**Concept:**
+- A markdown editor (with live preview) where each `.md` file is associated
+  with a persistent Claude session id — edits accrue context across a working
+  session rather than being one-shot prompts.
+- Select a passage and issue an instruction (e.g. "we just want to refine this
+  section", "tighten this", "make this more formal"); only the selected range
+  is sent for refinement and the returned text replaces the selection.
+- The session id lets the model carry document context/history between
+  refinements (consistent voice, prior decisions) without re-sending the whole
+  document each time.
+
+**Data model:**
+- Use a small SQL database (e.g. SQLite) for the associated data rather than
+  ad-hoc files — the current PTY sessions are ephemeral/in-memory only:
+  - `documents` — file path/id, title, current session id, timestamps.
+  - `sessions` — Claude session id ↔ document, model, created/last-used.
+  - `revisions` — per-refinement history (selection range, instruction,
+    before/after text) for undo + audit.
+
+**Example flow:**
+1. Open `notes.md` → editor loads it and looks up (or creates) its associated
+   session id in SQL.
+2. User selects a paragraph and types "we just want to refine this section".
+3. Backend sends only that selection (+ session context) to the model; the
+   reply replaces the selection; a `revisions` row is recorded.
+
+**Open questions:**
+- Section granularity: refine the raw selection, or snap to the enclosing
+  markdown block (heading / list / paragraph)?
+- Apply mode: replace in place, or show a diff with accept/reject before
+  committing?
+- Where does refinement run — a headless `claude -p` session (like the
+  structurer) or a direct API call (the `Structurer`-style adapter)?
+- Conflict handling if the file changes on disk outside the editor.
+
+
 - [ ] Add ability to cancel individual nodes from the UI.
 - [ ] Implement multi-session support (multiple active pipelines).
 - [ ] Persistent pipeline history in the sidebar.

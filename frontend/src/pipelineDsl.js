@@ -31,6 +31,23 @@ export function parseDsl(text) {
       continue;
     }
 
+    // dyn_batch: cmd            -> fan out one terminal per item, list derived
+    //                              at runtime (LLM-structured if not already a list)
+    // dyn_batch(N): cmd         -> N identical terminals (best-of-N), no LLM
+    if (line.startsWith("dyn_batch")) {
+      const match = line.match(/^dyn_batch(?:\((\d+)\))?:\s*(.*)$/);
+      if (match) {
+        const count = match[1] ? parseInt(match[1]) : null;
+        const { argv, cwd } = _parseCommand(match[2]);
+        const node = count != null
+          ? { id: nextId(), type: "fanout", argv, count }
+          : { id: nextId(), type: "dynamic_batch", argv };
+        if (cwd !== null) node.cwd = cwd;
+        nodes.push(node);
+      }
+      continue;
+    }
+
     if (line.startsWith("batch:") || line.startsWith("batch(")) {
       // batch(N): cmd1, cmd2...
       const match = line.match(/^batch(?:\((\d+)\))?:\s*(.*)$/);

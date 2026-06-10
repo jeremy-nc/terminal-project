@@ -1,15 +1,21 @@
 import React, { useState, useEffect, useRef } from "react";
-import { runPipeline, mountNodeTerm, unmountTab } from "../terminalController.js";
+import { runPipeline, cancelPipeline, mountNodeTerm, unmountTab } from "../terminalController.js";
 import { parseDsl } from "../pipelineDsl.js";
 import { b64dec } from "../wire.js";
 
-function decodeResult(result) {
+function decodeOne(result) {
   if (!result?.output) return "";
   try {
     return new TextDecoder().decode(b64dec(result.output));
   } catch {
     return result.output;
   }
+}
+
+function decodeResult(result) {
+  // A fan-out / dynamic-batch stage resolves to a list of per-worker results.
+  if (Array.isArray(result)) return result.map(decodeOne).join("\n");
+  return decodeOne(result);
 }
 
 /** A live xterm view for a single pipeline node session. */
@@ -26,11 +32,14 @@ export default function PipelineDashboard({ pipelines, tabs }) {
   const [specText, setSpecText] = useState(
     "# Sample Pipeline\n" +
     "dir: @~/Code/terminal-project\n" +
-    "seq:   auggie --print -m prism-a --mcp-config '{}' \"hello no code edits\"\n" +
-    "batch: claude, bash -c \"sleep 2; echo Job B\"\n" +
+    "seq:   claude -p \"List three numbers between 1 and 100, comma-separated, numbers only\"\n" +
+    "dyn_batch: claude -p \"In one sentence, say something interesting about {{input}}\"\n" +
+    "batch: claude, bash -c \"echo Job B\"\n" +
     "seq:   bash -c \"echo Done. Output: {{input}}\"\n" +
-    "# Per-command dir: append @path or @\"path with spaces\"\n" +
-    "# seq: git log @~/Code/terminal-project"
+    "# Stage 1 emits 3 numbers; dyn_batch structures them and fans out one\n" +
+    "# terminal per number. The batch then runs an interactive claude beside a\n" +
+    "# quick echo (interactive claude stays open until you exit it or Cancel).\n" +
+    "# Best-of-N (8 identical runs): dyn_batch(8): claude -p \"pick a color\""
   );
   const [preview, setPreview] = useState(null);
 
@@ -56,6 +65,21 @@ export default function PipelineDashboard({ pipelines, tabs }) {
           <div className="node-label">Batch</div>
           <div className="node-children">
             {node.nodes.map(n => renderNode(n))}
+          </div>
+        </div>
+      );
+    }
+
+    if (node.type === "dynamic_batch" || node.type === "fanout") {
+      const label = node.type === "dynamic_batch" ? "Dynamic Batch" : "Fan-out";
+      const width = node.count != null ? `×${node.count}` : "×N at runtime";
+      return (
+        <div key={node.id || Math.random()} className="node-container batch">
+          <div className="node-label">{label} {width}</div>
+          <div className="node-container terminal">
+            <div className="terminal-status-dot pending"></div>
+            <div className="terminal-id">Terminal template</div>
+            <div className="terminal-argv">{node.argv.join(" ")}</div>
           </div>
         </div>
       );
@@ -93,6 +117,40 @@ export default function PipelineDashboard({ pipelines, tabs }) {
           <div className="node-label">Batch · parallel</div>
           <div className="node-children parallel">
             {node.nodes.map(child => renderLiveNodeTree(child))}
+          </div>
+        </div>
+      );
+    }
+
+    if (node.type === "dynamic_batch" || node.type === "fanout") {
+      // Children don't exist in the spec — they're spawned at runtime and
+      // arrive lazily via node_started events, keyed by this node's id.
+      const kids = active.childrenByParent?.[node.id] || [];
+      const label = node.type === "dynamic_batch" ? "Dynamic Batch · fan-out" : "Fan-out · parallel";
+      return (
+        <div key={node.id} className="node-container batch live">
+          <div className="node-label">{label}</div>
+          <div className="node-children parallel">
+            {kids.length === 0
+              ? <div className="text-faint">Waiting for fan-out…</div>
+              : kids.map(child => {
+                  const status = active.statusById?.[child.nodeId] || "pending";
+                  const tabId = `node-${child.nodeId}`;
+                  const hasTab = tabs.some(t => t.id === tabId);
+                  return (
+                    <div
+                      key={child.nodeId}
+                      className={`node-container terminal live status-${status} ${status === 'waiting' ? 'pulse' : ''}`}
+                    >
+                      <div className="node-term-head">
+                        <div className="terminal-status-dot"></div>
+                        <span className="terminal-id">{(child.argv || []).join(" ")}</span>
+                        <span className="terminal-status-text">{status}</span>
+                      </div>
+                      {hasTab && <NodeTerminal tabId={tabId} />}
+                    </div>
+                  );
+                })}
           </div>
         </div>
       );
@@ -139,7 +197,18 @@ export default function PipelineDashboard({ pipelines, tabs }) {
             <div className="pipeline-header">
               <span className="pipeline-title">Live Pipeline #{active.id}</span>
               <span className={`status-pill status-${active.status}`}>{active.status}</span>
+              {active.status === "running" && (
+                <button className="btn-cancel" onClick={cancelPipeline}>Cancel</button>
+              )}
             </div>
+            {active.warnings?.length > 0 && (
+              <div className="pipeline-warnings">
+                {active.warnings.map((w, i) => <div key={i} className="warn-line">⚠ {w}</div>)}
+              </div>
+            )}
+            {active.status === "error" && active.error && (
+              <div className="pipeline-error-banner">✕ {active.error}</div>
+            )}
             <div className="live-tree">
               {active.spec
                 ? renderLiveNodeTree(active.spec)

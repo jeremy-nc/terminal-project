@@ -102,7 +102,9 @@ def _validate_cwds(spec: dict, global_cwd: str = None) -> str:
             return f"Global dir does not exist or is not a directory: {global_cwd!r}"
 
     ntype = spec.get("type")
-    if ntype == "terminal":
+    if ntype in ("terminal", "fanout", "dynamic_batch"):
+        # fanout/dynamic_batch children are created at runtime, but the node's
+        # own cwd (its template's working dir) can still be validated up front.
         raw = spec.get("cwd")
         if raw:
             resolved = _resolve_cwd(raw, global_cwd)
@@ -148,9 +150,17 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         try:
             root = build_node_tree(spec, manager, sub)
             engine = PipelineEngine(root, sub)
-            asyncio.create_task(engine.execute(msg.get("input")))
+            # Track the task on the subscriber so a "cancel_pipeline" message can
+            # cancel it (which kills any in-flight child PTYs via TerminalNode).
+            sub.pipeline_task = asyncio.create_task(engine.execute(msg.get("input")))
         except Exception as e:
             sub.send({"type": "error", "message": f"failed to build pipeline: {e}"})
+        return
+
+    if mtype == "cancel_pipeline":
+        task = getattr(sub, "pipeline_task", None)
+        if task and not task.done():
+            task.cancel()
         return
 
     sess = manager.sessions.get(msg.get("id"))

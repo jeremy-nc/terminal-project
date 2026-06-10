@@ -337,6 +337,7 @@ html, body, #root { height: 100%; margin: 0; }
 
 .pipeline-main {
   flex: 1;
+  min-width: 0; /* allow shrink so wide xterm content can't widen the page */
   background: var(--bg);
   padding: 24px;
   overflow-y: auto;
@@ -493,20 +494,21 @@ html, body, #root { height: 100%; margin: 0; }
   flex-shrink: 0;
 }
 
-/* Override .node-children inside the live batch row to prevent wrapping and
-   keep cards in a single horizontal row even when there are many of them. */
+/* Live batch/fan-out row: wrap cards so they fit the window width instead of
+   overflowing in a single horizontal scroll row. */
 .node-children.parallel {
-  flex-wrap: nowrap;
-  overflow-x: auto;
-  padding-bottom: 4px; /* room for scrollbar */
+  flex-wrap: wrap;
   align-items: stretch; /* equal-height cards */
 }
 
-/* Each terminal leaf card inside a parallel batch row gets a minimum width
-   so its xterm has room, but can grow to fill available space evenly. */
+/* Up to 4 cards per row: a quarter of the row minus its share of the 12px gap
+   (3 gaps / 4 cards = 9px). So the 8-wide cap lays out as two rows of 4; fewer
+   cards grow to fill the row. min-width:0 lets the xterm refit rather than
+   forcing the card (and the page) wider than the viewport. */
 .node-children.parallel > .node-container.terminal {
-  min-width: 280px;
-  flex: 1 1 280px;
+  flex: 1 1 calc(25% - 9px);
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* Pulse animation for waiting nodes */
@@ -516,4 +518,40 @@ html, body, #root { height: 100%; margin: 0; }
 }
 .node-container.live.pulse {
   animation: pulse-border 1.6s ease-in-out infinite;
+}
+
+/* ── pipeline status: cancel, warnings, error ──────────────── */
+.status-pill.status-error { background: var(--danger); color: #fff; }
+
+.btn-cancel {
+  margin-left: auto;
+  background: transparent;
+  color: var(--danger);
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  padding: 4px 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-cancel:hover { background: color-mix(in srgb, var(--danger) 16%, transparent); }
+
+.pipeline-warnings {
+  margin: 8px 0;
+}
+.warn-line {
+  color: var(--warn);
+  font-size: 12px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--warn);
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+  margin-bottom: 4px;
+}
+.pipeline-error-banner {
+  color: var(--danger);
+  font-size: 13px;
+  padding: 8px 12px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  margin: 8px 0;
 }

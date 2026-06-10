@@ -128,6 +128,11 @@ function _handleMsg(msg) {
             spec: _pendingSpec,
             statusById: {},
             sessionById: {},
+            // Runtime-discovered children keyed by parent node id (fan-out): the
+            // dynamic subtree isn't in the spec, so it's grown from node events.
+            childrenByParent: {},
+            warnings: [],
+            error: null,
             result: null,
           },
         ],
@@ -142,11 +147,33 @@ function _handleMsg(msg) {
       });
       break;
     }
+    case "pipeline_error": {
+      // Backend stopped the coordinator (build error, structurer failure, or
+      // cancellation). Move the live pipeline to a terminal error state so the
+      // UI doesn't sit on "running" forever.
+      _setState({
+        pipelines: _state.pipelines.map((p) =>
+          p.status === "running" ? { ...p, status: "error", error: msg.message } : p
+        ),
+      });
+      break;
+    }
+    case "node_warning": {
+      _setState({
+        pipelines: _state.pipelines.map((p) =>
+          p.status === "running" ? { ...p, warnings: [...(p.warnings || []), msg.message] } : p
+        ),
+      });
+      break;
+    }
     case "node_started": {
       // Only terminal (leaf) nodes own a live session; batch/sequence wrappers
       // are drawn from the spec tree, not from events.
-      if (msg.node_type === "terminal") {
+      // Internal plumbing nodes (e.g. the dynamic-batch structurer) run
+      // server-side but are never surfaced as cards.
+      if (msg.node_type === "terminal" && !msg.internal) {
         const nodeId = msg.node_id;
+        const parentId = msg.node_id != null ? msg.parent_id : null;
         const tabId = `node-${nodeId}`;
         if (!_state.tabs.find(t => t.id === tabId)) {
           const tab = { id: tabId, title: `Job ${nodeId}`, sessionId: msg.id, status: "running", isNode: true };
@@ -159,6 +186,17 @@ function _handleMsg(msg) {
                     ...p,
                     statusById: { ...p.statusById, [nodeId]: "running" },
                     sessionById: { ...p.sessionById, [nodeId]: msg.id },
+                    // Runtime-spawned fan-out children carry a parent_id; record
+                    // them under that parent so the live view can nest them.
+                    childrenByParent: parentId != null
+                      ? {
+                          ...p.childrenByParent,
+                          [parentId]: [
+                            ...(p.childrenByParent?.[parentId] || []).filter(c => c.nodeId !== nodeId),
+                            { nodeId, argv: msg.argv, sessionId: msg.id },
+                          ],
+                        }
+                      : (p.childrenByParent || {}),
                   }
                 : p
             ),
@@ -267,6 +305,7 @@ export function mountTab(tabId, mainHost, mirrorHost) {
 export function unmountTab(tabId) {
   const rec = _terms.get(tabId);
   if (!rec) return;
+  rec.ro?.disconnect();
   rec.main.dispose();
   rec.mirror?.dispose();
   _terms.delete(tabId);
@@ -305,8 +344,13 @@ export function mountNodeTerm(tabId, host) {
     if (t?.sessionId) _send({ type: "stdin", id: t.sessionId, data: strToB64(data) });
   });
 
+  // Refit (and resize the PTY) whenever the card's width changes — wrapping,
+  // window resize, or layout settling — so the xterm fits its column.
+  const ro = new ResizeObserver(() => fitTab(tabId));
+  ro.observe(host);
+
   // Register before attaching so replay/stdout has a terminal to write to.
-  _terms.set(tabId, { main, mirror: null, mainFit, mirrorFit: null });
+  _terms.set(tabId, { main, mirror: null, mainFit, mirrorFit: null, ro });
 
   if (tab.sessionId) _send({ type: "attach", id: tab.sessionId });
   fitTab(tabId);
@@ -319,6 +363,12 @@ export function runPipeline(spec) {
   // confirms with "pipeline_started".
   _pendingSpec = spec;
   _send({ type: "run_pipeline", pipeline: spec });
+}
+
+export function cancelPipeline() {
+  // The server cancels the running task, which kills any in-flight child PTYs
+  // and emits "pipeline_error" back so the UI reflects the stop.
+  _send({ type: "cancel_pipeline" });
 }
 
 export function activateTab(tabId) {

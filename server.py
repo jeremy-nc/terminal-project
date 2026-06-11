@@ -25,6 +25,12 @@ import os
 from typing import Any
 from contextlib import asynccontextmanager
 
+from dotenv import load_dotenv
+
+# Load .env before anything reads the environment (e.g. ANTHROPIC_API_KEY for
+# Agent nodes). Values already set in the real environment take precedence.
+load_dotenv()
+
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
@@ -102,15 +108,15 @@ def _validate_cwds(spec: dict, global_cwd: str = None) -> str:
             return f"Global dir does not exist or is not a directory: {global_cwd!r}"
 
     ntype = spec.get("type")
-    if ntype in ("terminal", "fanout", "dynamic_batch"):
+    if ntype in ("terminal", "fanout", "dynamic_batch", "agent"):
         # fanout/dynamic_batch children are created at runtime, but the node's
         # own cwd (its template's working dir) can still be validated up front.
         raw = spec.get("cwd")
         if raw:
             resolved = _resolve_cwd(raw, global_cwd)
             if not os.path.isdir(resolved):
-                argv_str = " ".join(spec.get("argv", []))
-                return f"Working directory does not exist for {argv_str!r}: {resolved!r}"
+                label = " ".join(spec.get("argv", [])) or spec.get("prompt", "")
+                return f"Working directory does not exist for {label!r}: {resolved!r}"
     elif ntype in ("batch", "sequence"):
         for child in spec.get("nodes", []):
             err = _validate_cwds(child, global_cwd)
@@ -185,6 +191,14 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             task.cancel()
         return
 
+    if mtype == "node_input":
+        # User steering for a running coordinator agent — route to its inbox.
+        registry = getattr(sub, "agent_inboxes", None) or {}
+        inbox = registry.get(msg.get("node_id"))
+        if inbox is not None:
+            inbox.put_nowait(msg.get("text", ""))
+        return
+
     sess = manager.sessions.get(msg.get("id"))
     if mtype == "attach":
         if not sess:
@@ -245,6 +259,13 @@ async def ws_endpoint(ws: WebSocket):
     except Exception as e:
         print(f"[ws] fatal error: {e!r}")
     finally:
+        # Cancel any in-flight pipeline so a disconnect doesn't leave a
+        # coordinator looping (spending API credits), children running, or an
+        # ask_user wait blocked forever. Cancellation kills child PTYs and runs
+        # each node's cleanup (inbox unregister, finish_virtual).
+        task = getattr(sub, "pipeline_task", None)
+        if task and not task.done():
+            task.cancel()
         manager.detach(sub)
         drain.cancel()
 

@@ -459,6 +459,35 @@ html, body, #root { height: 100%; margin: 0; }
 }
 .terminal-status-dot.pending { background: var(--text-faint); }
 
+/* Agent nodes get a distinct accent so they read as more than a plain terminal. */
+.node-container.agent {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border-strong));
+}
+.node-container.agent .terminal-id { color: var(--accent-hover); }
+.agent-system {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Hint shown on a coordinator card while it waits for the user's typed reply
+   (typed directly into the interactive terminal above). */
+.agent-waiting-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--warn);
+}
+
+/* Delegated sub-agents nested inside a coordinator card. */
+.agent-children {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border-strong);
+}
+
 /* Live status overrides */
 .node-container.live { cursor: default; transition: border-color 150ms ease; }
 .node-container.live.status-running { border-color: var(--accent); }

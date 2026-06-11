@@ -271,6 +271,18 @@ function _handleMsg(msg) {
       }
       break;
     }
+    case "node_status": {
+      // Explicit status transition (e.g. a coordinator resuming after ask_user).
+      if (msg.node_id == null) break;
+      _setState({
+        pipelines: _state.pipelines.map(p =>
+          p.status === "running"
+            ? { ...p, statusById: { ...p.statusById, [msg.node_id]: msg.status } }
+            : p
+        ),
+      });
+      break;
+    }
     case "error":
       console.warn("[ws] server error:", msg.message);
       break;
@@ -366,7 +378,7 @@ export function unmountTab(tabId) {
  * the PipelineEngine), so we attach to it for replay + live output rather than
  * sending a "start".
  */
-export function mountNodeTerm(tabId, host) {
+export function mountNodeTerm(tabId, host, agentNodeId = null) {
   if (_terms.has(tabId)) { fitTab(tabId); return; } // already mounted
   const tab = _state.tabs.find((t) => t.id === tabId);
   if (!tab) return;
@@ -387,7 +399,27 @@ export function mountNodeTerm(tabId, host) {
   main.loadAddon(mainFit);
   main.open(host);
 
+  let _line = "";
   main.onData((data) => {
+    if (agentNodeId) {
+      // Interactive coordinator terminal: a virtual session has no PTY to echo
+      // or receive stdin, so echo locally and send the whole line to the agent
+      // (its inbox) on Enter — so it behaves like a classic terminal.
+      if (data.startsWith("\x1b")) return; // ignore arrow keys / escape seqs
+      for (const ch of data) {
+        if (ch === "\r" || ch === "\n") {
+          main.write("\r\n");
+          if (_line.trim()) sendNodeInput(agentNodeId, _line);
+          _line = "";
+        } else if (ch === "\x7f" || ch === "\b") {
+          if (_line.length) { _line = _line.slice(0, -1); main.write("\b \b"); }
+        } else if (ch >= " ") {
+          _line += ch;
+          main.write(ch);
+        }
+      }
+      return;
+    }
     const t = _state.tabs.find((x) => x.id === tabId);
     if (t?.sessionId) _send({ type: "stdin", id: t.sessionId, data: strToB64(data) });
   });
@@ -417,6 +449,11 @@ export function cancelPipeline() {
   // The server cancels the running task, which kills any in-flight child PTYs
   // and emits "pipeline_error" back so the UI reflects the stop.
   _send({ type: "cancel_pipeline" });
+}
+
+/** Steer a running coordinator agent — routed to its inbox by node_id. */
+export function sendNodeInput(nodeId, text) {
+  _send({ type: "node_input", node_id: nodeId, text });
 }
 
 export function activateTab(tabId) {

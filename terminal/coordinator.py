@@ -501,6 +501,324 @@ class DynamicBatchNode(Node):
         return await self.fanout.run(items)
 
 
+class AgentBackend:
+    """Port: translate a prompt + config into a runnable command (argv).
+
+    Mirrors Structurer — lets another agent CLI (e.g. auggie) or a future
+    SDK/steerable/delegating backend slot in without touching the node tree or
+    the DSL. Only ClaudeAgentBackend exists for now.
+    """
+
+    def build_argv(self, prompt: str, config: dict) -> List[str]:
+        raise NotImplementedError
+
+
+class ClaudeAgentBackend(AgentBackend):
+    """Runs Claude headless via the CLI (`claude -p`). Translates our config
+    (e.g. `model`) into Claude's actual flags."""
+
+    def build_argv(self, prompt: str, config: dict) -> List[str]:
+        argv = ["claude", "-p"]
+        model = (config or {}).get("model")
+        if model:
+            argv += ["--model", model]
+        argv.append(prompt)
+        return argv
+
+
+class AgentNode(Node):
+    """A single agent turn. Runs the backend's CLI through a PTY so it renders
+    as a terminal card; the AgentBackend port keeps room for other backends and
+    a later steerable/delegating implementation. ``delegate`` is carried as
+    config but not yet wired to visible sub-agent spawning.
+    """
+
+    def __init__(
+        self,
+        manager: SessionManager,
+        backend: AgentBackend,
+        prompt: str,
+        config: dict = None,
+        cols: int = 80,
+        rows: int = 24,
+        event_bus: Subscriber = None,
+        node_id: Any = None,
+        cwd: str = None,
+        outputs: dict = None,
+        parent_id: Any = None,
+    ):
+        self.manager = manager
+        self.backend = backend
+        self.prompt = prompt
+        self.config = config or {}
+        self.cols = cols
+        self.rows = rows
+        self.event_bus = event_bus
+        self.node_id = node_id
+        self.cwd = cwd
+        self.outputs = outputs
+        self.parent_id = parent_id
+
+    async def run(self, input_data: Any) -> Any:
+        # build_argv leaves {{input}} in the prompt; the inner TerminalNode does
+        # the interpolation (and the node_started/finished + outputs recording)
+        # under this node's id, so the agent appears like any terminal node.
+        argv = self.backend.build_argv(self.prompt, self.config)
+        node = TerminalNode(
+            manager=self.manager,
+            argv_template=argv,
+            cols=self.cols,
+            rows=self.rows,
+            event_bus=self.event_bus,
+            node_id=self.node_id,
+            cwd=self.cwd,
+            outputs=self.outputs,
+            parent_id=self.parent_id,
+        )
+        return await node.run(input_data)
+
+
+# The CLI accepts model aliases ("opus"); the SDK Messages API needs full ids.
+_MODEL_ALIASES = {
+    "opus": "claude-opus-4-8",
+    "sonnet": "claude-sonnet-4-6",
+    "haiku": "claude-haiku-4-5",
+}
+
+
+def _resolve_model(m: Optional[str]) -> str:
+    if not m:
+        return "claude-opus-4-8"
+    return _MODEL_ALIASES.get(m, m)  # pass full ids through unchanged
+
+
+DELEGATE_TOOL = {
+    "name": "delegate",
+    "description": (
+        "Delegate a self-contained sub-task to a sub-agent. The sub-agent runs "
+        "Claude with full local tools in the working directory and returns its "
+        "result. Use this to do real work — you (the coordinator) cannot read "
+        "files or run commands yourself, only delegate."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Short title for the sub-task / sub-agent."},
+            "task": {"type": "string", "description": "Full, self-contained instructions for the sub-agent."},
+        },
+        "required": ["name", "task"],
+    },
+}
+
+ASK_USER_TOOL = {
+    "name": "ask_user",
+    "description": (
+        "Ask the human a question and wait for their typed reply. Use this only "
+        "when you need information or a decision that only the user can provide "
+        "(e.g. which ticket to read). Returns the user's answer."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"question": {"type": "string", "description": "The question for the user."}},
+        "required": ["question"],
+    },
+}
+
+DEFAULT_COORDINATOR_SYSTEM = (
+    "You are a coordinator agent. You have two tools: `delegate` spawns a "
+    "sub-agent to do real work and returns its result; `ask_user` asks the human "
+    "a question and waits for their reply. Break the request into sub-tasks, "
+    "delegate them, ask the user when you genuinely need their input, and "
+    "synthesize a final answer from the results. Keep your own messages brief."
+)
+
+
+class CoordinatorAgentNode(Node):
+    """An agent that runs the Anthropic Messages API in a loop with a single
+    ``delegate`` tool. Each delegate call spawns a child :class:`AgentNode`
+    (CLI) under this node, runs it, and feeds its result back as the tool
+    result. The coordinator's transcript renders in a virtual session (a
+    terminal card); the children render nested beneath it via ``parent_id``.
+    """
+
+    def __init__(
+        self,
+        manager: SessionManager,
+        prompt: str,
+        system: str = None,
+        model: str = None,
+        config: dict = None,
+        cols: int = 80,
+        rows: int = 24,
+        event_bus: Subscriber = None,
+        node_id: Any = None,
+        cwd: str = None,
+        outputs: dict = None,
+        max_delegations: int = 4,
+        max_turns: int = 12,
+    ):
+        self.manager = manager
+        self.prompt = prompt
+        self.system = system or DEFAULT_COORDINATOR_SYSTEM
+        self.model = _resolve_model(model)
+        self.config = config or {}
+        self.cols = cols
+        self.rows = rows
+        self.event_bus = event_bus
+        self.node_id = node_id
+        self.cwd = cwd
+        self.outputs = outputs
+        self.max_delegations = max_delegations
+        self.max_turns = max_turns
+
+    def _narrate(self, vsess, text: str) -> None:
+        # Terminal cards expect CRLF line endings.
+        self.manager.feed(vsess, text.replace("\n", "\r\n").encode())
+
+    def _register_inbox(self, inbox) -> Optional[dict]:
+        """Register this coordinator's inbound message queue on the subscriber,
+        keyed by node_id, so the server can route `node_input` (user steering)
+        to the right running coordinator. Returns the registry (for cleanup)."""
+        if self.event_bus is None or self.node_id is None:
+            return None
+        registry = getattr(self.event_bus, "agent_inboxes", None)
+        if registry is None:
+            registry = {}
+            try:
+                self.event_bus.agent_inboxes = registry
+            except Exception:
+                return None
+        registry[self.node_id] = inbox
+        return registry
+
+    def _drain(self, inbox) -> List[str]:
+        out = []
+        while not inbox.empty():
+            out.append(inbox.get_nowait())
+        return out
+
+    async def run(self, input_data: Any) -> Any:
+        from anthropic import AsyncAnthropic  # lazy: only coordinator nodes need it
+
+        vsess = self.manager.create_virtual(self.cols, self.rows)
+        if self.event_bus:
+            self.event_bus.send({
+                "type": "node_started", "node_type": "terminal",
+                "id": vsess.id, "node_id": self.node_id, "parent_id": None,
+                "internal": False, "argv": ["coordinator"],
+            })
+
+        inbox = asyncio.Queue()
+        registry = self._register_inbox(inbox)
+
+        kickoff = (
+            self.prompt.replace("{{input}}", render_input(input_data))
+            if self.prompt else (render_input(input_data) or "go")
+        )
+        self._narrate(vsess, f"coordinator · {self.model}\n> {kickoff}\n\n")
+
+        client = AsyncAnthropic()
+        messages = [{"role": "user", "content": kickoff}]
+        final_text = ""
+        delegations = 0
+        try:
+            for _turn in range(self.max_turns):
+                resp = await client.messages.create(
+                    model=self.model,
+                    max_tokens=4096,
+                    system=self.system,
+                    tools=[DELEGATE_TOOL, ASK_USER_TOOL],
+                    messages=messages,
+                )
+                for block in resp.content:
+                    if block.type == "text" and block.text.strip():
+                        final_text = block.text
+                        self._narrate(vsess, block.text + "\n")
+                if resp.stop_reason != "tool_use":
+                    # Autonomous end — unless the user has queued steering input.
+                    pending = self._drain(inbox)
+                    if pending:
+                        # (no narration: terminal already echoed the typed input)
+                        messages.append({"role": "assistant", "content": resp.content})
+                        messages.append({"role": "user", "content": "\n".join(pending)})
+                        continue
+                    break
+                messages.append({"role": "assistant", "content": resp.content})
+                tool_results = []
+                for block in resp.content:
+                    if block.type != "tool_use":
+                        continue
+                    if block.name == "delegate":
+                        name = block.input.get("name", "sub-agent")
+                        task = block.input.get("task", "")
+                        if delegations >= self.max_delegations:
+                            tool_results.append({
+                                "type": "tool_result", "tool_use_id": block.id,
+                                "content": "Delegation limit reached.", "is_error": True,
+                            })
+                            continue
+                        self._narrate(vsess, f"\n→ delegating [{name}]…\n")
+                        child = AgentNode(
+                            manager=self.manager,
+                            backend=ClaudeAgentBackend(),
+                            prompt=task,
+                            config={"model": self.config.get("model")},
+                            cols=self.cols, rows=self.rows,
+                            event_bus=self.event_bus,
+                            node_id=f"{self.node_id}/{delegations}",
+                            cwd=self.cwd,
+                            outputs=self.outputs,
+                            parent_id=self.node_id,
+                        )
+                        delegations += 1
+                        child_result = await child.run(None)
+                        child_text = render_input(child_result)
+                        tool_results.append({
+                            "type": "tool_result", "tool_use_id": block.id,
+                            "content": child_text or "(no output)",
+                        })
+                        self._narrate(vsess, f"← [{name}] returned ({len(child_text)} chars)\n")
+                    elif block.name == "ask_user":
+                        question = block.input.get("question", "")
+                        self._narrate(vsess, f"\n? {question}\n")
+                        if self.event_bus:
+                            self.event_bus.send({
+                                "type": "needs_input", "id": vsess.id,
+                                "node_id": self.node_id, "parent_id": None,
+                                "last_output": question.encode(),
+                            })
+                        answer = await inbox.get()  # block until the user replies
+                        if self.event_bus:
+                            self.event_bus.send({
+                                "type": "node_status", "node_id": self.node_id, "status": "running",
+                            })
+                        # (no narration: the terminal already locally-echoed the
+                        # user's typed reply)
+                        tool_results.append({
+                            "type": "tool_result", "tool_use_id": block.id,
+                            "content": answer or "(no answer)",
+                        })
+                messages.append({"role": "user", "content": tool_results})
+        finally:
+            try:
+                await client.close()  # release the httpx connection pool
+            except Exception:
+                pass
+            if registry is not None:
+                registry.pop(self.node_id, None)
+            self.manager.finish_virtual(vsess)
+
+        result = {"output": final_text.encode(), "exit_code": 0}
+        if self.outputs is not None and self.node_id is not None:
+            self.outputs[self.node_id] = result
+        if self.event_bus:
+            self.event_bus.send({
+                "type": "node_finished", "id": vsess.id, "node_id": self.node_id,
+                "parent_id": None, "exit_code": 0, "output": final_text.encode(),
+            })
+        return result
+
+
 class PipelineEngine:
     """Entry point for running a composed pipeline and watching its progress."""
 
@@ -615,6 +933,24 @@ def build_node_tree(
             cwd=resolved,
         )
         return DynamicBatchNode(fanout, structurer, event_bus=event_bus, node_id=node_id)
+    elif ntype == "agent":
+        raw_cwd = spec.get("cwd")
+        resolved = _resolve_cwd(raw_cwd, _global_cwd) if raw_cwd else _global_cwd
+        # An agent node is a coordinator: it runs the SDK loop with a `delegate`
+        # tool and spawns child CLI AgentNodes (claude -p) for the real work.
+        return CoordinatorAgentNode(
+            manager=manager,
+            prompt=spec.get("prompt", ""),
+            system=spec.get("system"),
+            model=spec.get("model"),
+            config={"model": spec.get("model"), "mcps": spec.get("mcps", [])},
+            cols=spec.get("cols", 80),
+            rows=spec.get("rows", 24),
+            event_bus=event_bus,
+            node_id=spec.get("id"),
+            cwd=resolved,
+            outputs=outputs,
+        )
     elif ntype == "batch":
         nodes = [build_node_tree(n, manager, event_bus, _global_cwd, outputs) for n in spec["nodes"]]
         return BatchNode(nodes, concurrency=spec.get("concurrency"), event_bus=event_bus)

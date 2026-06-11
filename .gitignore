@@ -6,6 +6,9 @@ __pycache__/
 venv/
 *.log
 
+# Secrets / local env (never commit the API key)
+.env
+
 # Node / frontend
 frontend/node_modules/
 frontend/dist/

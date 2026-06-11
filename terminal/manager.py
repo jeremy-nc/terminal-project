@@ -52,6 +52,28 @@ class SessionManager:
         print(f"[sess] create {sid} pid={pid} fd={fd} (total={len(self.sessions)})", flush=True)
         return sess
 
+    def create_virtual(self, cols: int = 80, rows: int = 24) -> Session:
+        """A session with no PTY: a producer (e.g. an SDK agent loop) writes
+        text via ``feed`` and it buffers/broadcasts exactly like a real PTY, so
+        it renders in a terminal card. Finish it with ``finish_virtual``."""
+        sid = uuid.uuid4().hex[:8]
+        sess = Session(sid, None, None, cols, rows)
+        self.sessions[sid] = sess
+        asyncio.create_task(self._broadcast_loop(sess))
+        print(f"[sess] create-virtual {sid} (total={len(self.sessions)})", flush=True)
+        return sess
+
+    def feed(self, sess: Session, data: bytes) -> None:
+        """Push producer output into a virtual session (buffer + broadcast)."""
+        if not sess.alive:
+            return
+        sess.append(data)
+        sess.queue.put_nowait(data)
+
+    def finish_virtual(self, sess: Session) -> None:
+        """Signal end-of-output for a virtual session (emits exit + cleanup)."""
+        sess.queue.put_nowait(None)
+
     def _on_readable(self, sess: Session) -> None:
         """Sync reader registered with the event loop; ordered via the queue."""
         try:
@@ -81,17 +103,19 @@ class SessionManager:
     async def _handle_exit(self, sess: Session) -> None:
         sess.alive = False
         code = None
-        try:
-            _, status = os.waitpid(sess.pid, 0)
-            code = os.waitstatus_to_exitcode(status)
-        except ChildProcessError:
-            pass
+        if sess.pid is not None:  # real PTY — reap the child
+            try:
+                _, status = os.waitpid(sess.pid, 0)
+                code = os.waitstatus_to_exitcode(status)
+            except ChildProcessError:
+                pass
         self._emit(sess, {"type": "exit", "id": sess.id, "code": code})
         self.sessions.pop(sess.id, None)
-        try:
-            os.close(sess.fd)
-        except OSError:
-            pass
+        if sess.fd is not None:
+            try:
+                os.close(sess.fd)
+            except OSError:
+                pass
         print(f"[sess] exit {sess.id} pid={sess.pid} code={code} (total={len(self.sessions)})", flush=True)
 
     def attach(self, sess: Session, sub: Subscriber) -> None:
@@ -119,21 +143,25 @@ class SessionManager:
 
     def write(self, sess: Session, data: bytes) -> None:
         """Write bytes to the PTY; silently ignore a just-closed fd."""
-        if not sess.alive:
-            return
+        if not sess.alive or sess.fd is None:
+            return  # virtual sessions have no PTY to write to
         try:
             os.write(sess.fd, data)
         except OSError:
             pass  # PTY may have just closed; the broadcast loop will send exit
 
     def resize(self, sess: Session, cols: int, rows: int) -> None:
-        if not sess.alive:
+        if not sess.alive or sess.fd is None:
             return
         sess.cols, sess.rows = cols, rows
         set_winsize(sess.fd, rows, cols)
 
     def kill(self, sess: Session) -> None:
         print(f"[sess] kill {sess.id} pid={sess.pid}", flush=True)
+        if sess.pid is None:  # virtual — just signal end-of-output
+            if sess.alive:
+                sess.queue.put_nowait(None)
+            return
         try:
             os.kill(sess.pid, signal.SIGHUP)
         except ProcessLookupError:
@@ -142,6 +170,8 @@ class SessionManager:
     def shutdown_all(self) -> None:
         """Force-kill every child process; used on server shutdown."""
         for sess in list(self.sessions.values()):
+            if sess.pid is None:
+                continue
             try:
                 os.kill(sess.pid, signal.SIGKILL)
             except ProcessLookupError:

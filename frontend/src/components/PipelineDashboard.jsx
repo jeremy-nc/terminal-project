@@ -18,13 +18,14 @@ function decodeResult(result) {
   return decodeOne(result);
 }
 
-/** A live xterm view for a single pipeline node session. */
-function NodeTerminal({ tabId }) {
+/** A live xterm view for a single pipeline node session. When agentNodeId is
+ *  set, the terminal is interactive (local echo + send line to the agent). */
+function NodeTerminal({ tabId, agentNodeId = null }) {
   const hostRef = useRef(null);
   useEffect(() => {
-    if (hostRef.current) mountNodeTerm(tabId, hostRef.current);
+    if (hostRef.current) mountNodeTerm(tabId, hostRef.current, agentNodeId);
     return () => unmountTab(tabId);
-  }, [tabId]);
+  }, [tabId, agentNodeId]);
   return <div className="node-term-host" ref={hostRef} />;
 }
 
@@ -32,14 +33,20 @@ export default function PipelineDashboard({ pipelines, tabs }) {
   const [specText, setSpecText] = useState(
     "# Sample Pipeline\n" +
     "dir: @~/Code/terminal-project\n" +
-    "seq:   claude -p \"List three numbers between 1 and 100, comma-separated, numbers only\"\n" +
-    "dyn_batch: claude -p \"In one sentence, say something interesting about {{input}}\"\n" +
-    "batch: claude, bash -c \"echo Job B\"\n" +
-    "seq:   bash -c \"echo Done. Output: {{input}}\"\n" +
-    "# Stage 1 emits 3 numbers; dyn_batch structures them and fans out one\n" +
-    "# terminal per number. The batch then runs an interactive claude beside a\n" +
-    "# quick echo (interactive claude stays open until you exit it or Cancel).\n" +
-    "# Best-of-N (8 identical runs): dyn_batch(8): claude -p \"pick a color\""
+    "seq: claude -p \"List three numbers between 0 and 100, comma-separated, numbers only\"\n" +
+    "dyn_batch: claude -p \"In one sentence, share something interesting about the number {{input}}\"\n" +
+    "agent:\n" +
+    "  system: |\n" +
+    "    You are a coordinator. Ask the user to pick the most interesting\n" +
+    "    discovery from the message. Delegate a sub-agent to write a 3-line\n" +
+    "    haiku about it. When it returns, show the user the haiku and use\n" +
+    "    ask_user to ask whether they are happy with it or want a different one.\n" +
+    "    If they want a different one, delegate again with their feedback.\n" +
+    "    Repeat until they are happy, then report the final haiku.\n" +
+    "  prompt: {{input}}\n" +
+    "seq: bash -c \"echo Coordinator output: {{input}}\"\n" +
+    "# Coordinator loop: pick discovery -> delegate haiku -> ask if you're happy\n" +
+    "# -> re-delegate if not (a new sub-agent card each time) -> finish when happy."
   );
   const [preview, setPreview] = useState(null);
 
@@ -91,6 +98,17 @@ export default function PipelineDashboard({ pipelines, tabs }) {
             <div className="terminal-id">Terminal template</div>
             <div className="terminal-argv">{node.argv.join(" ")}</div>
           </div>
+        </div>
+      );
+    }
+
+    if (node.type === "agent") {
+      return (
+        <div key={node.id || Math.random()} className="node-container terminal agent">
+          <div className="terminal-status-dot pending"></div>
+          <div className="terminal-id">Agent · {node.backend}{node.model ? ` (${node.model})` : ""}</div>
+          {node.system && <div className="agent-system">⚙ {node.system.split("\n")[0]}</div>}
+          <div className="terminal-argv">{node.prompt}</div>
         </div>
       );
     }
@@ -161,6 +179,49 @@ export default function PipelineDashboard({ pipelines, tabs }) {
                     </div>
                   );
                 })}
+          </div>
+        </div>
+      );
+    }
+
+    if (node.type === "agent") {
+      const status = active.statusById?.[node.id] || "pending";
+      const tabId = `node-${node.id}`;
+      const hasTab = tabs.some(t => t.id === tabId);
+      // Delegated sub-agents are spawned at runtime and sit in the same row as
+      // the coordinator (dyn_batch-style), so the first delegate is next to it.
+      const kids = active.childrenByParent?.[node.id] || [];
+      return (
+        <div key={node.id} id={`pl-node-${node.id}`} className="node-container batch live">
+          <div className="node-label">Agent · {node.backend}{node.model ? ` (${node.model})` : ""}</div>
+          {node.system && <div className="agent-system">⚙ {node.system.split("\n")[0]}</div>}
+          <div className="node-children parallel">
+            {/* the coordinator's own terminal — the first card in the row */}
+            <div className={`node-container terminal agent live status-${status} ${status === 'waiting' ? 'pulse' : ''}`}>
+              <div className="node-term-head">
+                <div className="terminal-status-dot"></div>
+                <span className="terminal-id">Coordinator</span>
+                <span className="terminal-status-text">{status}</span>
+              </div>
+              {hasTab && <NodeTerminal tabId={tabId} agentNodeId={node.id} />}
+              {status === "waiting" && <div className="agent-waiting-hint">⌨ type your reply, then Enter</div>}
+            </div>
+            {/* delegated sub-agents — next to the coordinator */}
+            {kids.map(child => {
+              const cstatus = active.statusById?.[child.nodeId] || "pending";
+              const ctabId = `node-${child.nodeId}`;
+              const chasTab = tabs.some(t => t.id === ctabId);
+              return (
+                <div key={child.nodeId} className={`node-container terminal live status-${cstatus} ${cstatus === 'waiting' ? 'pulse' : ''}`}>
+                  <div className="node-term-head">
+                    <div className="terminal-status-dot"></div>
+                    <span className="terminal-id">{(child.argv || []).join(" ")}</span>
+                    <span className="terminal-status-text">{cstatus}</span>
+                  </div>
+                  {chasTab && <NodeTerminal tabId={ctabId} />}
+                </div>
+              );
+            })}
           </div>
         </div>
       );

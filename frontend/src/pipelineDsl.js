@@ -14,7 +14,8 @@
  */
 
 export function parseDsl(text) {
-  const lines = text.split("\n").map(l => l.trim()).filter(l => l && !l.startsWith("#"));
+  // Keep raw lines (with indentation) so the agent block form can be detected.
+  const rawLines = text.split("\n");
   const nodes = [];
   let globalCwd = null;
 
@@ -23,11 +24,41 @@ export function parseDsl(text) {
   let _seq = 0;
   const nextId = () => `n${_seq++}`;
 
-  for (const line of lines) {
+  let i = 0;
+  while (i < rawLines.length) {
+    const line = rawLines[i].trim();
+    i++;
+    if (!line || line.startsWith("#")) continue;
+
     // dir: @~/path  OR  dir: ~/path  (global working directory)
     if (line.startsWith("dir:")) {
       const raw = line.slice(4).trim();
       globalCwd = raw.startsWith("@") ? raw.slice(1) : raw;
+      continue;
+    }
+
+    // agent: <prompt>            -> inline Agent (coordinator), backend claude
+    // agent: claude -m opus "…"  -> inline, lead with a backend to pass flags
+    // agent:                     -> block form with indented system:/prompt:/model:
+    if (line.startsWith("agent:")) {
+      const inline = line.slice(6).trim();
+      if (inline) {
+        nodes.push(_parseAgentInline(inline, nextId()));
+      } else {
+        const { block, next } = _parseAgentBlock(rawLines, i);
+        i = next;
+        nodes.push({
+          id: nextId(),
+          type: "agent",
+          backend: "claude",
+          model: block.model || null,
+          system: block.system || null,
+          // kickoff defaults to the upstream output ({{input}}), like every node
+          prompt: block.prompt != null ? block.prompt : "{{input}}",
+          mcps: [],
+          delegate: true,
+        });
+      }
       continue;
     }
 
@@ -79,6 +110,72 @@ export function parseDsl(text) {
   const root = { id: "root", type: "sequence", nodes };
   if (globalCwd !== null) root.cwd = globalCwd;
   return root;
+}
+
+/** Inline agent form: `<prompt>` or `claude -m opus "<prompt>"`. */
+function _parseAgentInline(inline, id) {
+  const KNOWN_BACKENDS = ["claude", "auggie"];
+  const tokens = _tokenize(inline);
+  let backend = "claude";
+  let model = null;
+  let prompt;
+  if (tokens.length && KNOWN_BACKENDS.includes(tokens[0])) {
+    backend = tokens[0];
+    const promptParts = [];
+    for (let j = 1; j < tokens.length; j++) {
+      if ((tokens[j] === "-m" || tokens[j] === "--model") && j + 1 < tokens.length) {
+        model = tokens[++j];
+      } else {
+        promptParts.push(tokens[j]);
+      }
+    }
+    prompt = promptParts.join(" ");
+  } else {
+    prompt = tokens.join(" ");
+  }
+  return { id, type: "agent", backend, model, prompt, system: null, mcps: [], delegate: true };
+}
+
+/**
+ * Indented agent block: `key: value` lines, plus `key: |` multi-line scalars
+ * (YAML-ish). Returns the parsed fields and the index where the block ended.
+ *   agent:
+ *     system: |
+ *       You are a triager…
+ *     prompt: {{input}}
+ */
+function _parseAgentBlock(rawLines, i) {
+  const block = {};
+  while (i < rawLines.length) {
+    const raw = rawLines[i];
+    if (!raw.trim()) { i++; continue; }            // blank line inside the block
+    const indent = raw.length - raw.trimStart().length;
+    if (indent === 0) break;                        // dedent -> block ends
+    const m = raw.trim().match(/^(\w+):\s*(.*)$/);
+    i++;
+    if (!m) continue;
+    const key = m[1];
+    let val = m[2];
+    if (val === "|") {
+      // multi-line scalar: gather lines indented deeper than this key
+      const buf = [];
+      while (i < rawLines.length) {
+        const ml = rawLines[i];
+        if (!ml.trim()) { buf.push(""); i++; continue; }
+        const mIndent = ml.length - ml.trimStart().length;
+        if (mIndent <= indent) break;
+        buf.push(ml);
+        i++;
+      }
+      const content = buf.filter(l => l.trim());
+      const strip = content.length
+        ? Math.min(...content.map(l => l.length - l.trimStart().length))
+        : 0;
+      val = buf.map(l => l.slice(strip)).join("\n").replace(/\s+$/, "");
+    }
+    block[key] = val;
+  }
+  return { block, next: i };
 }
 
 /** 

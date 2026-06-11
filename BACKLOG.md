@@ -89,3 +89,19 @@ instructing the LLM.
 - [ ] Support for more complex DSL structures (nested batches/sequences).
 - [ ] Advanced terminal features (search, clear buffer).
 - [ ] Dark/Light mode toggle persistence.
+- [ ] Agent tree view: render a coordinator and its delegated sub-agents as an
+      indented tree with a connector line (Augment-style), and dim/shrink the
+      child cards so they clearly read as subordinate. (For now they lay out
+      horizontally next to the coordinator like a dyn_batch row.)
+- [ ] Sub-coordinator + relay channel (delegate-initiated questions). Today a
+      delegated sub-agent is a one-shot `claude -p` that can't ask for input;
+      the coordinator mediates all user interaction (delegate → ask_user →
+      re-delegate). To let a sub-agent *pause mid-task and ask up the chain*:
+      make the delegate a sub-coordinator (SDK loop) with an `ask_coordinator`
+      tool, and pass a **relay callback** when spawning it. `ask_coordinator(q)`
+      → `await relay(q)` → the parent narrates it and calls its own `ask_user`
+      → the human answers in the coordinator's terminal → the answer flows back
+      down and the sub-agent resumes. Keeps a single conversational surface (the
+      coordinator) while letting sub-agents drive questions into it. Recursive —
+      depth-cap it. (Note: a delegate with its *own* `ask_user` would instead
+      prompt the user directly as a second surface, which we want to avoid.)

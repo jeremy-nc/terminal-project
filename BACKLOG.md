@@ -85,6 +85,16 @@ instructing the LLM.
 
 - [ ] Add ability to cancel individual nodes from the UI.
 - [ ] Implement multi-session support (multiple active pipelines).
+- [ ] Stdin-based `{{input}}` passing (shell-injection safety). Today `{{input}}`
+      is substituted textually into a node's argv, so a stage like
+      `bash -c "echo {{input}}"` lets multi-line agent output be interpreted by
+      the shell — e.g. markdown `> line` blockquotes became `>`-redirections and
+      created junk files in the working dir. Add a way to feed `{{input}}` to a
+      command via **stdin** (written to the process after spawn) so it's treated
+      as data, never shell-interpreted. Likely a DSL marker (e.g. `{{stdin}}` or
+      a per-node flag) so authors opt in; pairs well with commands that read
+      stdin (`cat`, `jq`, an LLM CLI's `-`/prompt-on-stdin mode). Keeps the
+      current arg-substitution form for cases that genuinely want it.
 - [ ] Persistent pipeline history in the sidebar.
 - [ ] Support for more complex DSL structures (nested batches/sequences).
 - [ ] Advanced terminal features (search, clear buffer).

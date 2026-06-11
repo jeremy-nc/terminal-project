@@ -44,9 +44,10 @@ export default function PipelineDashboard({ pipelines, tabs }) {
     "    If they want a different one, delegate again with their feedback.\n" +
     "    Repeat until they are happy, then report the final haiku.\n" +
     "  prompt: {{input}}\n" +
-    "seq: bash -c \"echo Coordinator output: {{input}}\"\n" +
     "# Coordinator loop: pick discovery -> delegate haiku -> ask if you're happy\n" +
-    "# -> re-delegate if not (a new sub-agent card each time) -> finish when happy."
+    "# -> re-delegate if not (a new sub-agent card each time) -> finish when happy.\n" +
+    "# NB: don't end with 'bash -c \"echo {{input}}\"' — piping multi-line agent\n" +
+    "# output into a shell lets '> line' blockquotes become file redirections."
   );
   const [preview, setPreview] = useState(null);
 

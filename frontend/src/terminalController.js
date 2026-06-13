@@ -456,6 +456,13 @@ export function sendNodeInput(nodeId, text) {
   _send({ type: "node_input", node_id: nodeId, text });
 }
 
+/** Launch a session in the real macOS Terminal. The server's active backend
+ *  decides the semantics: a true tmux re-attach, or a fresh shell at the
+ *  session's working directory under the bare backend. */
+export function openInTerminal(sessionId) {
+  if (sessionId) _send({ type: "open_in_terminal", id: sessionId });
+}
+
 export function activateTab(tabId) {
   _setState({ activeTabId: tabId });
   // Refit after the new tab's hosts become visible (next microtask).

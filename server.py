@@ -220,6 +220,16 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
     elif mtype == "resize":
         if sess:
             manager.resize(sess, int(msg["cols"]), int(msg["rows"]))
+    elif mtype == "open_in_terminal":
+        # Launch this session in the real macOS Terminal. Only PTY-backed
+        # sessions (with a pid) can be opened; virtual agent sessions can't.
+        if sess and sess.pid is not None:
+            try:
+                manager.open_in_terminal(sess)
+            except Exception as e:
+                sub.send({"type": "error", "message": f"open in terminal failed: {e}"})
+        else:
+            sub.send({"type": "error", "message": "cannot open this session in Terminal"})
     elif mtype == "close":
         if sess:
             manager.kill(sess)

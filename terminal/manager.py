@@ -10,7 +10,7 @@ import uuid
 
 from .pty_utils import resolve_shell, set_winsize
 from .session import Session, Subscriber
-from .backends import BarePtyBackend
+from .backends import BarePtyBackend, make_backend
 
 GRACE_PERIOD = 30  # seconds to wait for reconnect before killing an orphan PTY
 
@@ -19,17 +19,25 @@ class SessionManager:
     def __init__(self, backend=None):
         self.sessions = {}
         self.loop = None
-        # The process-backing strategy (bare PTY by default). Only spawning and
-        # termination route through it; the read loop, ring buffer, broadcast,
-        # resize, and grace-kill below are backend-agnostic.
-        self._backend = backend or BarePtyBackend()
+        # Interactive tabs use the configured backend (tmux when available, so
+        # they can be handed off to a native Terminal as a shared session).
+        # Pipeline nodes force the bare backend via create(raw=True) because the
+        # coordinator pipes their raw stdout downstream — tmux's rendered screen
+        # would corrupt that. Each session remembers which backend made it, so
+        # kill/shutdown/handoff route correctly. Only spawning and termination
+        # touch a backend; the read loop, buffer, broadcast, resize, and
+        # grace-kill below are backend-agnostic.
+        self._backend = backend or make_backend()
+        self._raw_backend = BarePtyBackend()
 
-    def create(self, shell_name: str = None, cols: int = 80, rows: int = 24, argv: list = None, cwd: str = None) -> Session:
+    def create(self, shell_name: str = None, cols: int = 80, rows: int = 24, argv: list = None, cwd: str = None, raw: bool = False) -> Session:
         sid = uuid.uuid4().hex[:8]
         if not argv:
             argv = resolve_shell(shell_name or "bash")
-        pid, fd = self._backend.spawn(sid, argv, cols, rows, cwd)
+        backend = self._raw_backend if raw else self._backend
+        pid, fd = backend.spawn(sid, argv, cols, rows, cwd)
         sess = Session(sid, fd, pid, cols, rows)
+        sess.backend = backend
         self.sessions[sid] = sess
         self.loop.add_reader(fd, self._on_readable, sess)
         asyncio.create_task(self._broadcast_loop(sess))
@@ -42,6 +50,7 @@ class SessionManager:
         it renders in a terminal card. Finish it with ``finish_virtual``."""
         sid = uuid.uuid4().hex[:8]
         sess = Session(sid, None, None, cols, rows)
+        sess.backend = None  # virtual: no process, never handed to a backend
         self.sessions[sid] = sess
         asyncio.create_task(self._broadcast_loop(sess))
         print(f"[sess] create-virtual {sid} (total={len(self.sessions)})", flush=True)
@@ -146,11 +155,17 @@ class SessionManager:
             if sess.alive:
                 sess.queue.put_nowait(None)
             return
-        self._backend.kill(sess)
+        sess.backend.kill(sess)
+
+    def open_in_terminal(self, sess: Session) -> None:
+        """Launch this session in the native macOS Terminal via its backend's
+        handoff strategy (true re-attach under tmux; fresh shell at cwd under
+        the bare backend)."""
+        sess.backend.native_handoff(sess)
 
     def shutdown_all(self) -> None:
         """Force-kill every child process; used on server shutdown."""
         for sess in list(self.sessions.values()):
             if sess.pid is None:
                 continue
-            self._backend.shutdown(sess)
+            sess.backend.shutdown(sess)

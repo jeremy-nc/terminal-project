@@ -1,4 +1,5 @@
 import React from "react";
+import OpenInTerminalButton from "./OpenInTerminalButton.jsx";
 
 export default function TabBar({ tabs, activeTabId, onActivate, onClose, onNew }) {
   return (
@@ -12,6 +13,7 @@ export default function TabBar({ tabs, activeTabId, onActivate, onClose, onNew }
           >
             <span className="tab-title">{tab.title}</span>
             {tab.status === "exited" && <span className="tab-badge">✕</span>}
+            <OpenInTerminalButton sessionId={tab.sessionId} className="tab-action" />
             <button
               className="tab-close"
               onClick={(e) => { e.stopPropagation(); onClose(tab.id); }}

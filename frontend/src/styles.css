@@ -101,6 +101,22 @@ html, body, #root { height: 100%; margin: 0; }
   transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
 }
 .tab-close:hover { color: var(--text); background: rgba(255, 255, 255, 0.06); }
+
+/* "Open in macOS Terminal" button — sits on tabs and on pipeline node cards. */
+.open-in-terminal {
+  background: none;
+  border: none;
+  color: var(--text-faint);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 3px;
+  border-radius: 4px;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.open-in-terminal:hover { color: var(--accent); background: rgba(255, 255, 255, 0.06); }
+/* On node cards, push it to the right edge of the head row. */
+.node-term-head .open-in-terminal.node-action { margin-left: auto; }
 .new-tab {
   background: transparent;
   color: var(--text-muted);

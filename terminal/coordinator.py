@@ -160,7 +160,10 @@ class TerminalNode(Node):
         argv = [arg.replace("{{input}}", rendered) for arg in self.argv_template]
 
         sub = CollectorSubscriber()
-        sess = self.manager.create(cols=self.cols, rows=self.rows, argv=argv, cwd=self.cwd)
+        # raw=True forces the bare PTY backend: this node's stdout is piped to
+        # the next stage, so it must be the command's clean output, not a
+        # tmux-rendered screen.
+        sess = self.manager.create(cols=self.cols, rows=self.rows, argv=argv, cwd=self.cwd, raw=True)
         self.current_session_id = sess.id
         self.manager.attach(sess, sub)
 

@@ -31,3 +31,10 @@ class TerminalBackend(Protocol):
     def shutdown(self, sess) -> None:
         """Force-kill the session's process on server shutdown (e.g. SIGKILL)."""
         ...
+
+    def native_handoff(self, sess) -> None:
+        """Open this session in the native (macOS) Terminal. What this means is
+        backend-specific: a multiplexed backend re-attaches the *same* live
+        session; a bare backend opens a fresh shell at its working directory.
+        Raises on failure (e.g. unsupported platform)."""
+        ...

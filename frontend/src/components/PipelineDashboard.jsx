@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from "react";
 import { runPipeline, cancelPipeline, mountNodeTerm, unmountTab } from "../terminalController.js";
 import { parseDsl } from "../pipelineDsl.js";
 import { b64dec } from "../wire.js";
+import OpenInTerminalButton from "./OpenInTerminalButton.jsx";
 
 function decodeOne(result) {
   if (!result?.output) return "";
@@ -175,6 +176,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
                         <div className="terminal-status-dot"></div>
                         <span className="terminal-id">{(child.argv || []).join(" ")}</span>
                         <span className="terminal-status-text">{status}</span>
+                        <OpenInTerminalButton sessionId={active.sessionById?.[child.nodeId]} className="node-action" />
                       </div>
                       {hasTab && <NodeTerminal tabId={tabId} />}
                     </div>
@@ -218,6 +220,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
                     <div className="terminal-status-dot"></div>
                     <span className="terminal-id">{(child.argv || []).join(" ")}</span>
                     <span className="terminal-status-text">{cstatus}</span>
+                    <OpenInTerminalButton sessionId={active.sessionById?.[child.nodeId]} className="node-action" />
                   </div>
                   {chasTab && <NodeTerminal tabId={ctabId} />}
                 </div>
@@ -243,6 +246,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
           <span className="terminal-id">{node.argv.join(" ")}</span>
           <span className="terminal-status-text">{status}</span>
           {status === 'waiting' && <span className="hitl-hint">Needs Input</span>}
+          <OpenInTerminalButton sessionId={active.sessionById?.[node.id]} className="node-action" />
         </div>
         {hasTab && <NodeTerminal tabId={tabId} />}
       </div>

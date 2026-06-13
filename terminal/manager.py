@@ -6,45 +6,29 @@ Output is delivered to :class:`Subscriber` objects as domain events whose
 """
 import asyncio
 import os
-import pty
-import signal
 import uuid
 
 from .pty_utils import resolve_shell, set_winsize
 from .session import Session, Subscriber
+from .backends import BarePtyBackend
 
 GRACE_PERIOD = 30  # seconds to wait for reconnect before killing an orphan PTY
 
 
 class SessionManager:
-    def __init__(self):
+    def __init__(self, backend=None):
         self.sessions = {}
         self.loop = None
+        # The process-backing strategy (bare PTY by default). Only spawning and
+        # termination route through it; the read loop, ring buffer, broadcast,
+        # resize, and grace-kill below are backend-agnostic.
+        self._backend = backend or BarePtyBackend()
 
     def create(self, shell_name: str = None, cols: int = 80, rows: int = 24, argv: list = None, cwd: str = None) -> Session:
         sid = uuid.uuid4().hex[:8]
         if not argv:
             argv = resolve_shell(shell_name or "bash")
-        pid, fd = pty.fork()
-        if pid == 0:  # child
-            env = os.environ.copy()
-            env["TERM"] = "xterm-256color"
-            if cwd:
-                try:
-                    os.chdir(cwd)
-                except OSError as e:
-                    # Print to stderr (visible in server log), then fall through
-                    # to exec so the session still starts (in the original dir).
-                    import sys
-                    print(f"[pty] chdir({cwd!r}) failed: {e}", file=sys.stderr, flush=True)
-            try:
-                os.execvpe(argv[0], argv, env)
-            except FileNotFoundError:
-                os.execvpe("bash", ["bash"], env)
-            os._exit(1)
-        # parent
-        set_winsize(fd, rows, cols)
-        os.set_blocking(fd, False)
+        pid, fd = self._backend.spawn(sid, argv, cols, rows, cwd)
         sess = Session(sid, fd, pid, cols, rows)
         self.sessions[sid] = sess
         self.loop.add_reader(fd, self._on_readable, sess)
@@ -162,17 +146,11 @@ class SessionManager:
             if sess.alive:
                 sess.queue.put_nowait(None)
             return
-        try:
-            os.kill(sess.pid, signal.SIGHUP)
-        except ProcessLookupError:
-            pass
+        self._backend.kill(sess)
 
     def shutdown_all(self) -> None:
         """Force-kill every child process; used on server shutdown."""
         for sess in list(self.sessions.values()):
             if sess.pid is None:
                 continue
-            try:
-                os.kill(sess.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            self._backend.shutdown(sess)

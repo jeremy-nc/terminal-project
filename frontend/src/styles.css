@@ -380,6 +380,32 @@ html, body { background: var(--bg); }
   outline: none;
 }
 .dsl-editor:focus { border-color: var(--accent); }
+/* Terminal-backend radio group above Run Pipeline. */
+.backend-select {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.backend-label {
+  font-family: var(--mono);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-faint);
+}
+.backend-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+.backend-option:has(input:checked) { color: var(--text); }
+.backend-option input { accent-color: var(--accent); cursor: pointer; margin: 0; }
+
 .btn-run {
   background: var(--accent);
   color: #fff;

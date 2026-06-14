@@ -52,6 +52,9 @@ export default function PipelineDashboard({ pipelines, tabs }) {
     "# output into a shell lets '> line' blockquotes become file redirections."
   );
   const [preview, setPreview] = useState(null);
+  // Backend for this run's pipeline-node sessions: "bare" (plain PTY, shown as
+  // "Default") or "tmux". Interactive tabs are unaffected.
+  const [backend, setBackend] = useState("bare");
 
   const active = pipelines[pipelines.length - 1];
 
@@ -75,7 +78,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
   }, [active?.currentStage]);
 
   const handleRun = () => {
-    if (preview) runPipeline(preview);
+    if (preview) runPipeline(preview, backend);
   };
 
   const renderNode = (node) => {
@@ -267,6 +270,21 @@ export default function PipelineDashboard({ pipelines, tabs }) {
           onChange={(e) => setSpecText(e.target.value)}
           spellCheck="false"
         />
+        <div className="backend-select" role="radiogroup" aria-label="Terminal backend">
+          <span className="backend-label">Terminal</span>
+          {[["bare", "Default"], ["tmux", "tmux"]].map(([value, label]) => (
+            <label key={value} className="backend-option">
+              <input
+                type="radio"
+                name="node-backend"
+                value={value}
+                checked={backend === value}
+                onChange={() => setBackend(value)}
+              />
+              {label}
+            </label>
+          ))}
+        </div>
         <button className="btn-run" onClick={handleRun} disabled={!!active && active.status === "running"}>
           {active && active.status === "running" ? "Running..." : "Run Pipeline"}
         </button>

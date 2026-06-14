@@ -162,6 +162,8 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         if cwd_error:
             sub.send({"type": "error", "message": cwd_error})
             return
+        # UI radio: which backend this run's node sessions use ('bare'|'tmux').
+        manager.select_node_backend(msg.get("backend"))
         # Coordinator-owned map of every leaf node's output (node_id -> result),
         # collected as nodes finish and sent back in pipeline_finished. Lives for
         # this run only — a fresh dict per pipeline, GC'd when the task ends.

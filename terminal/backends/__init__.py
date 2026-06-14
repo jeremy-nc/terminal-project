@@ -30,4 +30,15 @@ def make_backend():
     return TmuxBackend() if shutil.which("tmux") else BarePtyBackend()
 
 
-__all__ = ["TerminalBackend", "BarePtyBackend", "TmuxBackend", "make_backend"]
+def available_backends():
+    """Selectable backends by UI name for the pipeline-run radio. 'bare' is the
+    plain PTY (labelled 'Default' in the UI); 'tmux' the multiplexer, only
+    offered when tmux is installed."""
+    backends = {"bare": BarePtyBackend()}
+    if shutil.which("tmux"):
+        backends["tmux"] = TmuxBackend()
+    return backends
+
+
+__all__ = ["TerminalBackend", "BarePtyBackend", "TmuxBackend",
+           "make_backend", "available_backends"]

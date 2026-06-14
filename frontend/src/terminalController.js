@@ -438,11 +438,12 @@ export function mountNodeTerm(tabId, host, agentNodeId = null) {
 }
 
 
-export function runPipeline(spec) {
+export function runPipeline(spec, backend = "bare") {
   // Remember the spec so the live view can render its tree once the server
-  // confirms with "pipeline_started".
+  // confirms with "pipeline_started". `backend` selects the node backend
+  // ("bare" = plain PTY / "Default", or "tmux").
   _pendingSpec = spec;
-  _send({ type: "run_pipeline", pipeline: spec });
+  _send({ type: "run_pipeline", pipeline: spec, backend });
 }
 
 export function cancelPipeline() {

@@ -83,6 +83,34 @@ instructing the LLM.
 - Conflict handling if the file changes on disk outside the editor.
 
 
+### Agent Skills Browser
+Fetch a popular public repo of agent skills and display the available skills in
+a browsable list in the UI.
+
+**Source repo (candidate):** [`addyosmani/agent-skills`](https://github.com/addyosmani/agent-skills)
+— "Production-grade engineering skills for AI coding agents" (~59k stars,
+default branch `main`). Verified layout: a top-level `skills/` directory holds
+~24 skill folders (`api-and-interface-design`, `code-review-and-quality`,
+`debugging-and-error-recovery`, …), each containing a `SKILL.md`.
+
+**Concept:**
+- Fetch the skill index via the GitHub contents API
+  (`/repos/addyosmani/agent-skills/contents/skills`), then read each folder's
+  `SKILL.md` and parse its frontmatter (`name`, `description`, etc.).
+- Render the skills as a searchable/filterable list (name + one-line
+  description, maybe tags) as a new view alongside Pipeline/Terminal.
+- Surface enough detail to decide relevance (description, source link) without
+  cloning the whole repo.
+
+**Open questions:**
+- Pin `addyosmani/agent-skills` as the single source, or make the source repo
+  (and branch/path) configurable so other skill collections can be added?
+- Fetch live via the GitHub API (unauthenticated = 60 req/hr rate limit; an
+  optional token raises it) vs. a cached / periodically-refreshed snapshot.
+- Read-only browse only, or also let the user import/install a selected skill
+  into the project (and eventually invoke one as a pipeline node)?
+
+
 - [ ] Add ability to cancel individual nodes from the UI.
 - [ ] Implement multi-session support (multiple active pipelines).
 - [ ] Stdin-based `{{input}}` passing (shell-injection safety). Today `{{input}}`

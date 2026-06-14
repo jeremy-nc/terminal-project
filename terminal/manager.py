@@ -10,7 +10,7 @@ import uuid
 
 from .pty_utils import resolve_shell, set_winsize
 from .session import Session, Subscriber
-from .backends import make_backend
+from .backends import make_backend, available_backends
 
 GRACE_PERIOD = 30  # seconds to wait for reconnect before killing an orphan PTY
 
@@ -29,6 +29,16 @@ class SessionManager:
         # loop, buffer, broadcast, resize, and grace-kill below are
         # backend-agnostic.
         self._backend = backend or make_backend()
+        # Backend used for pipeline NODE sessions (capture=True), chosen per-run
+        # via the UI radio. Interactive tabs always use self._backend. Defaults
+        # to the configured backend until the run_pipeline handler selects one.
+        self._node_backends = available_backends()
+        self._node_backend = self._backend
+
+    def select_node_backend(self, name: str) -> None:
+        """Pick the backend for pipeline-node sessions ('bare' | 'tmux'); falls
+        back to the configured backend for unknown/unavailable names."""
+        self._node_backend = self._node_backends.get(name) or self._backend
 
     def reset_backend(self) -> None:
         """Discard stale backend state (e.g. a leftover tmux server) so sessions
@@ -39,7 +49,9 @@ class SessionManager:
         sid = uuid.uuid4().hex[:8]
         if not argv:
             argv = resolve_shell(shell_name or "bash")
-        backend = self._backend
+        # Pipeline nodes (capture) use the UI-selected node backend; interactive
+        # tabs always use the configured backend.
+        backend = self._node_backend if capture else self._backend
         if capture:
             pid, fd = backend.spawn_captured(sid, argv, cols, rows, cwd)
         else:

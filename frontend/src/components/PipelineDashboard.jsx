@@ -45,6 +45,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
     "    If they want a different one, delegate again with their feedback.\n" +
     "    Repeat until they are happy, then report the final haiku.\n" +
     "  prompt: {{input}}\n" +
+    "seq: claude\n" +
     "# Coordinator loop: pick discovery -> delegate haiku -> ask if you're happy\n" +
     "# -> re-delegate if not (a new sub-agent card each time) -> finish when happy.\n" +
     "# NB: don't end with 'bash -c \"echo {{input}}\"' — piping multi-line agent\n" +
@@ -173,10 +174,11 @@ export default function PipelineDashboard({ pipelines, tabs }) {
                       className={`node-container terminal live status-${status} ${status === 'waiting' ? 'pulse' : ''}`}
                     >
                       <div className="node-term-head">
+                        {(status === "running" || status === "waiting") &&
+                          <OpenInTerminalButton sessionId={active.sessionById?.[child.nodeId]} className="node-action" />}
                         <div className="terminal-status-dot"></div>
-                        <span className="terminal-id">{(child.argv || []).join(" ")}</span>
+                        <span className="terminal-id" title={(child.argv || []).join(" ")}>{(child.argv || []).join(" ")}</span>
                         <span className="terminal-status-text">{status}</span>
-                        <OpenInTerminalButton sessionId={active.sessionById?.[child.nodeId]} className="node-action" />
                       </div>
                       {hasTab && <NodeTerminal tabId={tabId} />}
                     </div>
@@ -217,10 +219,11 @@ export default function PipelineDashboard({ pipelines, tabs }) {
               return (
                 <div key={child.nodeId} className={`node-container terminal live status-${cstatus} ${cstatus === 'waiting' ? 'pulse' : ''}`}>
                   <div className="node-term-head">
+                    {(cstatus === "running" || cstatus === "waiting") &&
+                      <OpenInTerminalButton sessionId={active.sessionById?.[child.nodeId]} className="node-action" />}
                     <div className="terminal-status-dot"></div>
-                    <span className="terminal-id">{(child.argv || []).join(" ")}</span>
+                    <span className="terminal-id" title={(child.argv || []).join(" ")}>{(child.argv || []).join(" ")}</span>
                     <span className="terminal-status-text">{cstatus}</span>
-                    <OpenInTerminalButton sessionId={active.sessionById?.[child.nodeId]} className="node-action" />
                   </div>
                   {chasTab && <NodeTerminal tabId={ctabId} />}
                 </div>
@@ -242,11 +245,12 @@ export default function PipelineDashboard({ pipelines, tabs }) {
         className={`node-container terminal live status-${status} ${status === 'waiting' ? 'pulse' : ''}`}
       >
         <div className="node-term-head">
+          {(status === "running" || status === "waiting") &&
+            <OpenInTerminalButton sessionId={active.sessionById?.[node.id]} className="node-action" />}
           <div className="terminal-status-dot"></div>
-          <span className="terminal-id">{node.argv.join(" ")}</span>
+          <span className="terminal-id" title={node.argv.join(" ")}>{node.argv.join(" ")}</span>
           <span className="terminal-status-text">{status}</span>
           {status === 'waiting' && <span className="hitl-hint">Needs Input</span>}
-          <OpenInTerminalButton sessionId={active.sessionById?.[node.id]} className="node-action" />
         </div>
         {hasTab && <NodeTerminal tabId={tabId} />}
       </div>

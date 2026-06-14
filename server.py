@@ -72,6 +72,9 @@ manager = SessionManager()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     manager.loop = asyncio.get_running_loop()
+    # Kill any stale tmux server so sessions started by this run pick up the
+    # current tmux.conf (tmux only reads its config when the server starts).
+    manager.reset_backend()
     yield
     manager.shutdown_all()
 
@@ -81,7 +84,13 @@ app = FastAPI(lifespan=lifespan)
 
 @app.get("/")
 async def index():
-    return FileResponse(os.path.join(DIST, "index.html"))
+    # Never cache index.html: it references content-hashed asset bundles, so a
+    # stale cached copy pins the browser to old JS/CSS even after a rebuild.
+    # (The hashed /assets/* are safe to cache forever.)
+    return FileResponse(
+        os.path.join(DIST, "index.html"),
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 # Serve the Vite-built assets (JS chunks, CSS, etc.) from /assets/

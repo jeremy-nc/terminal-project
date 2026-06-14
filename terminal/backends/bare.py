@@ -54,3 +54,18 @@ class BarePtyBackend:
 
     def native_handoff(self, sess):
         open_terminal_at(_live_cwd(sess.pid))
+
+    # A bare PTY's output IS the command's clean stdout, so no side-tap is
+    # needed: spawn normally and tell the caller (read_capture -> None) to use
+    # the PTY stream it already collects.
+    def spawn_captured(self, sid, argv, cols, rows, cwd=None):
+        return self.spawn(sid, argv, cols, rows, cwd)
+
+    def read_capture(self, sess):
+        return None
+
+    def end_capture(self, sess):
+        pass
+
+    def reset_server(self):
+        pass  # no shared server

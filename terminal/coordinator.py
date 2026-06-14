@@ -10,10 +10,13 @@ from .session import Subscriber
 # piped into a downstream node as {{input}} or rendered as a final result.
 # Covers CSI (ESC[...), OSC (ESC]...BEL/ST), and the nF/Fp/Fe single-final
 # escapes (charset designation like ESC(B, keypad modes like ESC=, etc.).
+# The OSC terminator is optional: a TUI tearing down on exit (e.g. claude under
+# tmux) can emit ESC]0; immediately followed by the next ESC with no BEL/ST, so
+# we also stop at the next ESC (the [^\x07\x1b]* already excludes it).
 _ANSI_RE = re.compile(
-    rb"\x1b\[[0-?]*[ -/]*[@-~]"            # CSI  (incl. private params <=>?)
-    rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"  # OSC  (terminated by BEL or ST)
-    rb"|\x1b[ -/]*[0-~]"                    # nF / charset / keypad / Fe escapes
+    rb"\x1b\[[0-?]*[ -/]*[@-~]"             # CSI  (incl. private params <=>?)
+    rb"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?"  # OSC  (BEL/ST terminator optional)
+    rb"|\x1b[ -/]*[0-~]"                     # nF / charset / keypad / Fe escapes
 )
 
 
@@ -160,10 +163,12 @@ class TerminalNode(Node):
         argv = [arg.replace("{{input}}", rendered) for arg in self.argv_template]
 
         sub = CollectorSubscriber()
-        # raw=True forces the bare PTY backend: this node's stdout is piped to
-        # the next stage, so it must be the command's clean output, not a
-        # tmux-rendered screen.
-        sess = self.manager.create(cols=self.cols, rows=self.rows, argv=argv, cwd=self.cwd, raw=True)
+        # capture=True: this node's stdout is piped downstream, so the backend
+        # sets up a clean side-tap. Under tmux the PTY stream is a rendered
+        # screen (good for the live card + native attach); read_capture() below
+        # returns the clean stdout for piping. Under the bare backend the PTY
+        # stream is already clean and read_capture() returns None.
+        sess = self.manager.create(cols=self.cols, rows=self.rows, argv=argv, cwd=self.cwd, capture=True)
         self.current_session_id = sess.id
         self.manager.attach(sess, sub)
 
@@ -194,7 +199,20 @@ class TerminalNode(Node):
         except asyncio.CancelledError:
             # Pipeline was cancelled: terminate the in-flight PTY before unwinding.
             self.manager.kill(sess)
+            self.manager.end_capture(sess)
             raise
+
+        # Prefer the backend's clean side-tap for the piped output; None means
+        # the PTY stream we already collected is clean (bare backend).
+        clean = self.manager.read_capture(sess)
+        if clean is not None:
+            output = clean
+        self.manager.end_capture(sess)
+
+        # Strip terminal control sequences at the source so the stored result is
+        # plain text for BOTH the piped {{input}} and the per-node output the UI
+        # renders. (The live card shows the raw rendered stream separately.)
+        output = _strip_ansi(bytes(output)).replace(b"\r\n", b"\n").replace(b"\r", b"")
 
         result = {"output": output, "exit_code": code}
         # Record into the coordinator's map (skip internal plumbing like the

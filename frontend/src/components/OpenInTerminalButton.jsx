@@ -6,7 +6,7 @@ import { openInTerminal } from "../terminalController.js";
  * until the session exists (sessionId set). Backend decides the semantics:
  * a true tmux re-attach, or a fresh shell at the session's working directory.
  */
-export default function OpenInTerminalButton({ sessionId, className = "" }) {
+export default function OpenInTerminalButton({ sessionId, className = "", label = "" }) {
   if (!sessionId) return null;
   return (
     <button
@@ -14,7 +14,8 @@ export default function OpenInTerminalButton({ sessionId, className = "" }) {
       title="Open in macOS Terminal"
       onClick={(e) => { e.stopPropagation(); openInTerminal(sessionId); }}
     >
-      ⤢
+      <span className="oit-icon">⤢</span>
+      {label && <span className="oit-label">{label}</span>}
     </button>
   );
 }

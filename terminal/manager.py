@@ -10,7 +10,7 @@ import uuid
 
 from .pty_utils import resolve_shell, set_winsize
 from .session import Session, Subscriber
-from .backends import BarePtyBackend, make_backend
+from .backends import make_backend
 
 GRACE_PERIOD = 30  # seconds to wait for reconnect before killing an orphan PTY
 
@@ -19,23 +19,31 @@ class SessionManager:
     def __init__(self, backend=None):
         self.sessions = {}
         self.loop = None
-        # Interactive tabs use the configured backend (tmux when available, so
-        # they can be handed off to a native Terminal as a shared session).
-        # Pipeline nodes force the bare backend via create(raw=True) because the
-        # coordinator pipes their raw stdout downstream — tmux's rendered screen
-        # would corrupt that. Each session remembers which backend made it, so
-        # kill/shutdown/handoff route correctly. Only spawning and termination
-        # touch a backend; the read loop, buffer, broadcast, resize, and
-        # grace-kill below are backend-agnostic.
+        # All sessions use the configured backend (tmux when available, so they
+        # can be handed off to a native Terminal as a shared session). Pipeline
+        # nodes additionally pass create(capture=True): the coordinator pipes
+        # their stdout downstream, and tmux's PTY stream is a rendered screen,
+        # so the backend sets up a clean side-tap (read via read_capture). Each
+        # session remembers its backend so kill/shutdown/handoff/capture route
+        # correctly. Only spawning and termination touch a backend; the read
+        # loop, buffer, broadcast, resize, and grace-kill below are
+        # backend-agnostic.
         self._backend = backend or make_backend()
-        self._raw_backend = BarePtyBackend()
 
-    def create(self, shell_name: str = None, cols: int = 80, rows: int = 24, argv: list = None, cwd: str = None, raw: bool = False) -> Session:
+    def reset_backend(self) -> None:
+        """Discard stale backend state (e.g. a leftover tmux server) so sessions
+        pick up the current config. Call once on server startup."""
+        self._backend.reset_server()
+
+    def create(self, shell_name: str = None, cols: int = 80, rows: int = 24, argv: list = None, cwd: str = None, capture: bool = False) -> Session:
         sid = uuid.uuid4().hex[:8]
         if not argv:
             argv = resolve_shell(shell_name or "bash")
-        backend = self._raw_backend if raw else self._backend
-        pid, fd = backend.spawn(sid, argv, cols, rows, cwd)
+        backend = self._backend
+        if capture:
+            pid, fd = backend.spawn_captured(sid, argv, cols, rows, cwd)
+        else:
+            pid, fd = backend.spawn(sid, argv, cols, rows, cwd)
         sess = Session(sid, fd, pid, cols, rows)
         sess.backend = backend
         self.sessions[sid] = sess
@@ -162,6 +170,16 @@ class SessionManager:
         handoff strategy (true re-attach under tmux; fresh shell at cwd under
         the bare backend)."""
         sess.backend.native_handoff(sess)
+
+    def read_capture(self, sess: Session):
+        """Clean stdout of a captured (pipeline) session, or None to fall back
+        to the PTY broadcast stream (bare backend)."""
+        return sess.backend.read_capture(sess) if sess.backend else None
+
+    def end_capture(self, sess: Session) -> None:
+        """Release a captured session's side-tap resources."""
+        if sess.backend:
+            sess.backend.end_capture(sess)
 
     def shutdown_all(self) -> None:
         """Force-kill every child process; used on server shutdown."""

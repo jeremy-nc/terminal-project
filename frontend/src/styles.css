@@ -36,6 +36,8 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 html, body, #root { height: 100%; margin: 0; }
+/* Paint the root dark so an uncovered strip never flashes white. */
+html, body { background: var(--bg); }
 
 .app {
   display: flex;
@@ -104,19 +106,34 @@ html, body, #root { height: 100%; margin: 0; }
 
 /* "Open in macOS Terminal" button — sits on tabs and on pipeline node cards. */
 .open-in-terminal {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   background: none;
   border: none;
-  color: var(--text-faint);
+  color: var(--text-muted);
   font-size: 13px;
   line-height: 1;
   cursor: pointer;
   padding: 0 3px;
   border-radius: 4px;
-  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+  transition: color var(--dur) var(--ease),
+              background var(--dur) var(--ease),
+              border-color var(--dur) var(--ease);
 }
 .open-in-terminal:hover { color: var(--accent); background: rgba(255, 255, 255, 0.06); }
-/* On node cards, push it to the right edge of the head row. */
-.node-term-head .open-in-terminal.node-action { margin-left: auto; }
+.open-in-terminal .oit-icon { font-size: 14px; }
+
+/* On node cards the ⤢ sits at the top-right, just left of the status dot.
+   Absolute so it never shifts the title; the head reserves right padding so
+   long titles don't run under it. */
+.node-term-head .open-in-terminal.node-action {
+  position: absolute;
+  top: 8px;
+  right: 28px;
+  padding: 1px 2px;
+  z-index: 1;
+}
 .new-tab {
   background: transparent;
   color: var(--text-muted);
@@ -321,6 +338,8 @@ html, body, #root { height: 100%; margin: 0; }
 /* ── pipeline screen ───────────────────────────────────── */
 .pipeline-screen {
   flex: 1;
+  min-width: 0; /* flex item of pipeline-view-wrap: must shrink below its
+                   3-column content width or the whole page overflows */
   display: flex;
   min-height: 0;
   gap: 1px; /* Divider between sidebar and main */
@@ -329,6 +348,10 @@ html, body, #root { height: 100%; margin: 0; }
 
 .pipeline-sidebar {
   width: 320px;
+  /* Let the sidebar shrink below the textarea's intrinsic width on narrow
+     windows; without this the textarea pins the sidebar wide and, with the
+     fixed-width output pane, overflows the row and pushes it off-screen. */
+  min-width: 0;
   background: var(--surface);
   display: flex;
   flex-direction: column;
@@ -344,6 +367,7 @@ html, body, #root { height: 100%; margin: 0; }
 }
 .dsl-editor {
   flex: 1;
+  min-width: 0; /* don't let the textarea's intrinsic cols width pin the sidebar */
   background: var(--bg);
   color: var(--text);
   border: 1px solid var(--border);
@@ -430,6 +454,11 @@ html, body, #root { height: 100%; margin: 0; }
   padding: 12px;
   margin-bottom: 12px;
   position: relative;
+  /* Let batch/agent wrapper cards shrink in their flex column so a single-line
+     (ellipsized) title can truncate instead of leaking its width up and pushing
+     the page wide. (.terminal cards re-assert a 180px floor below; parallel
+     children reset to 0 — so only the wrappers are affected.) */
+  min-width: 0;
 }
 .node-container.batch {
   border-color: var(--border-strong);
@@ -521,8 +550,28 @@ html, body, #root { height: 100%; margin: 0; }
   gap: 8px;
   margin-bottom: 8px;
   flex-shrink: 0;
+  /* min-width:0 + overflow:hidden let the nowrap title ellipsize instead of
+     leaking its full width up and forcing the card (and page) wider. */
+  min-width: 0;
+  overflow: hidden;
+  /* Reserve the top-right corner for the status dot + ⤢ badge so long titles
+     don't run under them; titles stay flush-left and aligned across all cards. */
+  padding-right: 46px;
 }
-.node-term-head .terminal-id { font-size: 12px; font-weight: 600; color: var(--text); }
+.node-term-head .terminal-id {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  /* Keep the title to one ellipsized line so a long command doesn't wrap the
+     header into a tall block (which pushed the status text to the middle). */
+  flex: 0 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* Status text stays on the title's line and never shrinks away. */
+.node-term-head .terminal-status-text { flex: none; }
 
 .hitl-hint {
   margin-left: auto;
@@ -583,6 +632,7 @@ html, body, #root { height: 100%; margin: 0; }
   display: flex;
   flex-direction: column;
   gap: 0;
+  min-width: 0; /* don't let nested content widen the tree past the pane */
 }
 
 /* Sequence wrapper — children stack vertically (series execution) */
@@ -590,6 +640,7 @@ html, body, #root { height: 100%; margin: 0; }
   display: flex;
   flex-direction: column;
   gap: 0;
+  min-width: 0;
 }
 
 /* Thin connector line drawn between consecutive sequence steps */
@@ -602,21 +653,21 @@ html, body, #root { height: 100%; margin: 0; }
   flex-shrink: 0;
 }
 
-/* Live batch/fan-out row: wrap cards so they fit the window width instead of
-   overflowing in a single horizontal scroll row. */
+/* Live batch/fan-out/agent row: CSS grid instead of flex. Grid tracks declared
+   as fractions (minmax(0, 1fr)) CANNOT be widened by their content — so a card
+   with a long single-line title (or a wide interactive xterm, e.g. the agent
+   coordinator) can never push the row past the viewport, which flex's
+   content-driven min sizing let happen. auto-fit fills the row when there are
+   few cards and wraps to new rows as more appear, each getting narrower. */
 .node-children.parallel {
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
   align-items: stretch; /* equal-height cards */
 }
-
-/* Up to 4 cards per row: a quarter of the row minus its share of the 12px gap
-   (3 gaps / 4 cards = 9px). So the 8-wide cap lays out as two rows of 4; fewer
-   cards grow to fill the row. min-width:0 lets the xterm refit rather than
-   forcing the card (and the page) wider than the viewport. */
+/* Grid items default to min-width:auto (min-content); reset so the card clips
+   to its track instead of overflowing it. */
 .node-children.parallel > .node-container.terminal {
-  flex: 1 1 calc(25% - 9px);
   min-width: 0;
-  max-width: 100%;
 }
 
 /* Pulse animation for waiting nodes */

@@ -38,3 +38,29 @@ class TerminalBackend(Protocol):
         session; a bare backend opens a fresh shell at its working directory.
         Raises on failure (e.g. unsupported platform)."""
         ...
+
+    # ── pipeline-node capture ────────────────────────────────────────────────
+    # Pipeline nodes pipe their stdout downstream, so they need the command's
+    # *clean* output even when the PTY stream is something else (tmux renders a
+    # screen). spawn_captured sets up a clean side-tap; read_capture returns it.
+
+    def spawn_captured(self, sid: str, argv: list, cols: int, rows: int, cwd: str = None):
+        """Like :meth:`spawn`, but also arrange a clean capture of the command's
+        raw stdout (see :meth:`read_capture`). Returns ``(pid, master_fd)``."""
+        ...
+
+    def read_capture(self, sess):
+        """Return the node's clean stdout as ``bytes``, or ``None`` if this
+        backend has no side-tap and the caller should use the PTY stream
+        instead (the bare backend's PTY output is already clean)."""
+        ...
+
+    def end_capture(self, sess) -> None:
+        """Tear down any capture resources created by :meth:`spawn_captured`."""
+        ...
+
+    def reset_server(self) -> None:
+        """Discard any stale shared backend state on app startup (e.g. kill a
+        leftover tmux server) so new sessions pick up the current config. No-op
+        for backends with no shared server."""
+        ...

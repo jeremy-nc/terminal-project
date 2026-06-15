@@ -26,6 +26,9 @@ class PipelineRun:
         self.agent_inboxes = {}
         # node_id -> result dict; the run's accumulated output context.
         self.node_outputs = {}
+        # node_id -> live session id, so a shared deep-link can resolve a node to
+        # its session and attach to it. Learned from node_started events.
+        self.node_sessions = {}
         # The asyncio.Task executing this run (set by the caller after create).
         self.task = None
 
@@ -33,6 +36,8 @@ class PipelineRun:
         """Forward a domain/transport event to the connection transport, stamped
         with this run's workspace_id so the client routes it to the right tab.
         Concurrent runs each have their own bus, so events never cross wires."""
+        if event.get("type") == "node_started" and event.get("node_id") is not None and event.get("id"):
+            self.node_sessions[event["node_id"]] = event["id"]
         if self.workspace_id is not None:
             event = {**event, "workspace_id": self.workspace_id}
         self._transport.send(event)

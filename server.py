@@ -22,6 +22,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 from typing import Any
 from contextlib import asynccontextmanager
 
@@ -70,6 +71,27 @@ def to_wire_json(event: dict) -> str:
     return json.dumps(to_wire(event))
 
 
+# Terminal capability QUERIES a program emits at startup (Device Attributes,
+# cursor/status reports, XTVERSION, Kitty keyboard, DECRQM, OSC colour). They
+# draw nothing, but a freshly-attached xterm replaying them will re-answer, and
+# those answers get injected into the live program's stdin and echo back as
+# visible garbage (e.g. ^[[?1;2c). Strip them from any replay.
+_QUERY_RE = re.compile(
+    rb"\x1b\[[0-9;]*c"               # Primary DA request
+    rb"|\x1b\[[>=][0-9;]*c"          # Secondary/Tertiary DA request
+    rb"|\x1b\[\??[0-9;]*n"           # DSR (cursor/status) request
+    rb"|\x1b\[>[0-9;]*q"             # XTVERSION request
+    rb"|\x1b\[\?[0-9;]*u"            # Kitty keyboard query
+    rb"|\x1b\[\?[0-9;]*\$p"          # DECRQM request
+    rb"|\x1b\][0-9]+;\?(?:\x07|\x1b\\)"  # OSC colour query
+)
+
+
+def _replay_data(sess) -> bytes:
+    """Replay snapshot with terminal queries stripped (see _QUERY_RE)."""
+    return _QUERY_RE.sub(b"", sess.snapshot())
+
+
 manager = SessionManager()
 workspaces = WorkspaceStore(WORKSPACES_FILE)
 
@@ -92,6 +114,16 @@ async def index():
     # Never cache index.html: it references content-hashed asset bundles, so a
     # stale cached copy pins the browser to old JS/CSS even after a rebuild.
     # (The hashed /assets/* are safe to cache forever.)
+    return FileResponse(
+        os.path.join(DIST, "index.html"),
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
+
+
+# Shared deep-links (/shared/workspace/{id}/t/{nodeId}) are client-side routes,
+# so serve the SPA shell for any /shared/* path; the frontend reads the URL.
+@app.get("/shared/{rest:path}")
+async def shared(rest: str):
     return FileResponse(
         os.path.join(DIST, "index.html"),
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
@@ -145,6 +177,17 @@ def _sub_runs(sub: Subscriber) -> dict:
     if runs is None:
         runs = sub.runs = {}
     return runs
+
+
+def _workspace_run(sub: Subscriber, wid: str):
+    """The live run for a workspace — resolved GLOBALLY via the workspace store
+    (ws.run), so any connection (e.g. a shared deep-link) can reach a running
+    workspace's inboxes/sessions, not just the one that started it. Falls back to
+    this connection's legacy single run when no workspace_id is given."""
+    if wid:
+        ws = workspaces.get(wid)
+        return ws.run if ws else None
+    return getattr(sub, "run", None)
 
 
 def _start_pipeline(sub, spec, backend, initial_input, workspace_id, previous):
@@ -241,21 +284,42 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         return
 
     if mtype in ("cancel_pipeline", "cancel_workspace"):
-        wid = msg.get("workspace_id")
-        run = _sub_runs(sub).get(wid) if wid else getattr(sub, "run", None)
+        run = _workspace_run(sub, msg.get("workspace_id"))
         if run and run.task and not run.task.done():
             run.task.cancel()
         return
 
     if mtype == "node_input":
         # User steering for a running coordinator agent — route to its inbox.
-        # workspace_id disambiguates which run owns the node (ids can repeat
-        # across workspaces); falls back to the legacy single run.
-        wid = msg.get("workspace_id")
-        run = _sub_runs(sub).get(wid) if wid else getattr(sub, "run", None)
+        # Resolved via the workspace's run, so a shared deep-link (a different
+        # connection) can drive a HITL node and unblock the real pipeline.
+        run = _workspace_run(sub, msg.get("workspace_id"))
         inbox = run.agent_inboxes.get(msg.get("node_id")) if run else None
         if inbox is not None:
             inbox.put_nowait(msg.get("text", ""))
+        return
+
+    if mtype == "attach_node":
+        # Shared deep-link: resolve (workspace, node) -> its live session and
+        # attach this connection to it (replay + live output), so a focused
+        # single-node view can mirror and drive it.
+        wid = msg.get("workspace_id")
+        nid = msg.get("node_id")
+        run = _workspace_run(sub, wid)
+        sid = run.node_sessions.get(nid) if run else None
+        sess = manager.sessions.get(sid) if sid else None
+        if not sess:
+            sub.send({"type": "node_attached", "workspace_id": wid, "node_id": nid,
+                      "error": "node is not running"})
+            return
+        manager.attach(sess, sub)
+        sub.send({
+            "type": "node_attached", "workspace_id": wid, "node_id": nid,
+            "id": sess.id, "data": _replay_data(sess), "cols": sess.cols, "rows": sess.rows,
+            # A virtual (no-pid) session is a coordinator -> line-based node_input;
+            # a real PTY node takes raw stdin.
+            "agent": sess.pid is None,
+        })
         return
 
     # ── Workspace CRUD (each op replies with the full list, the client's
@@ -297,7 +361,7 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             {
                 "type": "replay",
                 "id": sess.id,
-                "data": sess.snapshot(),
+                "data": _replay_data(sess),
                 "cols": sess.cols,
                 "rows": sess.rows,
             }

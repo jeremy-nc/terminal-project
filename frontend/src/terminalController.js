@@ -265,6 +265,20 @@ function _handleMsg(msg) {
       _patchWorkspace(wid, (w) => ({ statusById: { ...w.statusById, [msg.node_id]: msg.status } }));
       break;
     }
+    case "node_attached": {
+      // Reply to a shared deep-link's attach_node: wire the focused xterm to the
+      // resolved session and paint its replay.
+      const key = `shared::${msg.workspace_id}::${msg.node_id}`;
+      const rec = _terms.get(key);
+      if (!rec) break;
+      if (msg.error) { rec.main.write(`\r\n[${msg.error}]\r\n`); break; }
+      rec._agent = !!msg.agent;       // coordinator (line input) vs PTY (raw stdin)
+      rec._sessionId = msg.id;
+      _bySession.set(msg.id, key);    // route live stdout/exit to this terminal
+      try { rec.main.resize(msg.cols || 80, msg.rows || 24); } catch (_) {}
+      if (msg.data) rec.main.write(b64dec(msg.data));
+      break;
+    }
     case "error":
       console.warn("[ws] server error:", msg.message);
       break;
@@ -465,6 +479,61 @@ export function sendNodeInput(workspaceId, nodeId, text) {
  *  session's working directory under the bare backend. */
 export function openInTerminal(sessionId) {
   if (sessionId) _send({ type: "open_in_terminal", id: sessionId });
+}
+
+// ── shared node deep-link ────────────────────────────────────────────────────
+export function shareLink(workspaceId, nodeId) {
+  return `${location.origin}/shared/workspace/${workspaceId}/t/${nodeId}`;
+}
+
+export function copyShareLink(workspaceId, nodeId) {
+  return navigator.clipboard.writeText(shareLink(workspaceId, nodeId));
+}
+
+/** Focused single-node terminal for the /shared/... route: attach to the node's
+ *  live session (resolved server-side via the workspace's run), mirror its
+ *  output, and drive its input (coordinator inbox or raw PTY stdin). */
+export function mountSharedNode(workspaceId, nodeId, host) {
+  const key = `shared::${workspaceId}::${nodeId}`;
+  if (_terms.has(key)) return key;
+
+  const mono = '"SF Mono", "JetBrains Mono", ui-monospace, "Menlo", monospace';
+  const main = new Terminal({
+    theme: {
+      background: "#0e0e10", foreground: "#ededef",
+      cursor: "#7c6cff", cursorAccent: "#0e0e10",
+      selectionBackground: "rgba(124, 108, 255, 0.30)",
+    },
+    fontFamily: mono, fontSize: 13, cursorBlink: true,
+  });
+  main.open(host);
+
+  let _line = "";
+  main.onData((data) => {
+    const rec = _terms.get(key);
+    if (!rec) return;
+    if (rec._agent) {
+      // Coordinator: no PTY echo — local echo + send the line to its inbox.
+      if (data.startsWith("\x1b")) return;
+      for (const ch of data) {
+        if (ch === "\r" || ch === "\n") {
+          main.write("\r\n");
+          if (_line.trim()) sendNodeInput(workspaceId, nodeId, _line);
+          _line = "";
+        } else if (ch === "\x7f" || ch === "\b") {
+          if (_line.length) { _line = _line.slice(0, -1); main.write("\b \b"); }
+        } else if (ch >= " ") { _line += ch; main.write(ch); }
+      }
+      return;
+    }
+    if (rec._sessionId) _send({ type: "stdin", id: rec._sessionId, data: strToB64(data) });
+  });
+
+  // We don't resize the shared session (it's owned by the run) — fix the grid to
+  // the session size on attach instead, so we never SIGWINCH the live node.
+  _terms.set(key, { main, mirror: null, mainFit: null, mirrorFit: null, _agent: false, _sessionId: null });
+  _send({ type: "attach_node", workspace_id: workspaceId, node_id: nodeId });
+  return key;
 }
 
 export function activateTab(tabId) {

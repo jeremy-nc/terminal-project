@@ -134,6 +134,17 @@ html, body { background: var(--bg); }
   padding: 1px 2px;
   z-index: 1;
 }
+/* Copy-shareable-link badge sits left of the ⤢ badge. */
+.copy-link {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 12px; line-height: 1; cursor: pointer; padding: 1px 2px;
+  border-radius: 4px;
+  transition: color var(--dur) var(--ease), background var(--dur) var(--ease);
+}
+.copy-link:hover { color: var(--accent); background: rgba(255,255,255,0.06); }
+.node-term-head .copy-link.node-action {
+  position: absolute; top: 8px; right: 50px; z-index: 1;
+}
 .new-tab {
   background: transparent;
   color: var(--text-muted);
@@ -323,6 +334,25 @@ html, body { background: var(--bg); }
 .ws-panel > .pipeline-screen { flex: 1; }
 .ws-empty { flex: 1; display: flex; align-items: center; justify-content: center;
   color: var(--text-faint); font-size: 13px; }
+
+/* ── shared single-node deep-link page ──────────────────── */
+.shared-view {
+  height: 100vh; display: flex; flex-direction: column;
+  background: var(--bg); color: var(--text);
+}
+.shared-head {
+  display: flex; align-items: center; gap: 12px;
+  padding: 10px 16px; background: var(--surface);
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.shared-title { font-family: var(--mono); font-weight: 700; font-size: 13px; }
+.shared-sub { font-size: 12px; color: var(--text-muted); }
+.shared-head .status { margin-left: auto; }
+.shared-term {
+  flex: 1; min-height: 0; margin: 12px; padding: 10px;
+  background: #0e0e10; border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden;
+}
 .main-pane {
   flex: 1;
   min-width: 0;
@@ -643,9 +673,9 @@ html, body { background: var(--bg); }
      leaking its full width up and forcing the card (and page) wider. */
   min-width: 0;
   overflow: hidden;
-  /* Reserve the top-right corner for the status dot + ⤢ badge so long titles
-     don't run under them; titles stay flush-left and aligned across all cards. */
-  padding-right: 46px;
+  /* Reserve the top-right corner for the status dot + ⤢ + 🔗 badges so long
+     titles don't run under them; titles stay flush-left across all cards. */
+  padding-right: 70px;
 }
 .node-term-head .terminal-id {
   font-size: 12px;

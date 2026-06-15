@@ -3,6 +3,7 @@ import { runWorkspace, cancelWorkspace, setWorkspaceDsl, mountNodeTerm, unmountT
 import { parseDsl } from "../pipelineDsl.js";
 import { b64dec } from "../wire.js";
 import OpenInTerminalButton from "./OpenInTerminalButton.jsx";
+import CopyLinkButton from "./CopyLinkButton.jsx";
 
 function decodeOne(result) {
   if (!result?.output) return "";
@@ -162,8 +163,10 @@ export default function PipelineDashboard({ workspace, tabs }) {
                       className={`node-container terminal live status-${status} ${status === 'waiting' ? 'pulse' : ''}`}
                     >
                       <div className="node-term-head">
-                        {(status === "running" || status === "waiting") &&
-                          <OpenInTerminalButton sessionId={active.sessionById?.[child.nodeId]} className="node-action" />}
+                        {(status === "running" || status === "waiting") && <>
+                          <CopyLinkButton workspaceId={active.id} nodeId={child.nodeId} className="node-action" />
+                          <OpenInTerminalButton sessionId={active.sessionById?.[child.nodeId]} className="node-action" />
+                        </>}
                         <div className="terminal-status-dot"></div>
                         <span className="terminal-id" title={(child.argv || []).join(" ")}>{(child.argv || []).join(" ")}</span>
                         <span className="terminal-status-text">{status}</span>
@@ -190,6 +193,8 @@ export default function PipelineDashboard({ workspace, tabs }) {
             {/* the coordinator's own terminal — the first card in the row */}
             <div className={`node-container terminal agent live status-${status} ${status === 'waiting' ? 'pulse' : ''}`}>
               <div className="node-term-head">
+                {(status === "running" || status === "waiting") &&
+                  <CopyLinkButton workspaceId={active.id} nodeId={node.id} className="node-action" />}
                 <div className="terminal-status-dot"></div>
                 <span className="terminal-id">Coordinator</span>
                 <span className="terminal-status-text">{status}</span>
@@ -205,8 +210,10 @@ export default function PipelineDashboard({ workspace, tabs }) {
               return (
                 <div key={child.nodeId} className={`node-container terminal live status-${cstatus} ${cstatus === 'waiting' ? 'pulse' : ''}`}>
                   <div className="node-term-head">
-                    {(cstatus === "running" || cstatus === "waiting") &&
-                      <OpenInTerminalButton sessionId={active.sessionById?.[child.nodeId]} className="node-action" />}
+                    {(cstatus === "running" || cstatus === "waiting") && <>
+                      <CopyLinkButton workspaceId={active.id} nodeId={child.nodeId} className="node-action" />
+                      <OpenInTerminalButton sessionId={active.sessionById?.[child.nodeId]} className="node-action" />
+                    </>}
                     <div className="terminal-status-dot"></div>
                     <span className="terminal-id" title={(child.argv || []).join(" ")}>{(child.argv || []).join(" ")}</span>
                     <span className="terminal-status-text">{cstatus}</span>
@@ -231,8 +238,10 @@ export default function PipelineDashboard({ workspace, tabs }) {
         className={`node-container terminal live status-${status} ${status === 'waiting' ? 'pulse' : ''}`}
       >
         <div className="node-term-head">
-          {(status === "running" || status === "waiting") &&
-            <OpenInTerminalButton sessionId={active.sessionById?.[node.id]} className="node-action" />}
+          {(status === "running" || status === "waiting") && <>
+            <CopyLinkButton workspaceId={active.id} nodeId={node.id} className="node-action" />
+            <OpenInTerminalButton sessionId={active.sessionById?.[node.id]} className="node-action" />
+          </>}
           <div className="terminal-status-dot"></div>
           <span className="terminal-id" title={node.argv.join(" ")}>{node.argv.join(" ")}</span>
           <span className="terminal-status-text">{status}</span>

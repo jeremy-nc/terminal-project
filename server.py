@@ -36,10 +36,14 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from terminal import SessionManager, Subscriber, build_node_tree, PipelineEngine
+from terminal import (
+    SessionManager, Subscriber, build_node_tree, PipelineEngine, PipelineRun,
+    WorkspaceStore,
+)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "frontend", "dist")
+WORKSPACES_FILE = os.path.join(HERE, "workspaces.json")
 
 
 def b64(data: bytes) -> str:
@@ -67,6 +71,7 @@ def to_wire_json(event: dict) -> str:
 
 
 manager = SessionManager()
+workspaces = WorkspaceStore(WORKSPACES_FILE)
 
 
 @asynccontextmanager
@@ -134,6 +139,54 @@ def _validate_cwds(spec: dict, global_cwd: str = None) -> str:
     return None
 
 
+def _sub_runs(sub: Subscriber) -> dict:
+    """The connection's workspace runs, keyed by workspace_id (lazily created)."""
+    runs = getattr(sub, "runs", None)
+    if runs is None:
+        runs = sub.runs = {}
+    return runs
+
+
+def _start_pipeline(sub, spec, backend, initial_input, workspace_id, previous):
+    """Validate, build, and kick off a pipeline run as a task. Returns the
+    PipelineRun (task set), or None if validation/build failed (error sent)."""
+    cwd_error = _validate_cwds(spec)
+    if cwd_error:
+        sub.send({"type": "error", "message": cwd_error})
+        return None
+    run = PipelineRun(sub, node_backend=backend, workspace_id=workspace_id)
+    try:
+        root = build_node_tree(spec, manager, run, outputs=run.node_outputs)
+    except Exception as e:
+        sub.send({"type": "error", "message": f"failed to build pipeline: {e}"})
+        return None
+
+    async def _run():
+        # Cancel a still-running prior run of THIS run/workspace first so a re-run
+        # doesn't leave orphaned PTYs (e.g. an interactive claude). Await teardown
+        # so the old run's "pipeline_error" flushes before the new "pipeline_started".
+        if previous and previous.task and not previous.task.done():
+            previous.task.cancel()
+            try:
+                await previous.task
+            except (asyncio.CancelledError, Exception):
+                pass
+        await PipelineEngine(root, run, outputs=run.node_outputs).execute(initial_input)
+
+    run.task = asyncio.create_task(_run())
+    return run
+
+
+def _send_workspaces(sub: Subscriber, created: str = None) -> None:
+    """Send the full workspace list (definitions). ``created`` flags a just-made
+    one so the client can auto-select it."""
+    sub.send({
+        "type": "workspace_list",
+        "workspaces": [w.to_json() for w in workspaces.list()],
+        "created": created,
+    })
+
+
 def handle_msg(sub: Subscriber, msg: dict) -> None:
     """Dispatch one client message; replies are enqueued on ``sub``."""
     mtype = msg.get("type")
@@ -154,60 +207,84 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         return
 
     if mtype == "run_pipeline":
+        # Legacy single-pipeline path (no workspace). Kept working while the
+        # frontend migrates to run_workspace.
         spec = msg.get("pipeline")
         if not spec:
             sub.send({"type": "error", "message": "missing pipeline spec"})
             return
-        cwd_error = _validate_cwds(spec)
-        if cwd_error:
-            sub.send({"type": "error", "message": cwd_error})
-            return
-        # UI radio: which backend this run's node sessions use ('bare'|'tmux').
-        manager.select_node_backend(msg.get("backend"))
-        # Coordinator-owned map of every leaf node's output (node_id -> result),
-        # collected as nodes finish and sent back in pipeline_finished. Lives for
-        # this run only — a fresh dict per pipeline, GC'd when the task ends.
-        node_outputs = {}
-        try:
-            root = build_node_tree(spec, manager, sub, outputs=node_outputs)
-        except Exception as e:
-            sub.send({"type": "error", "message": f"failed to build pipeline: {e}"})
-            return
-
-        initial_input = msg.get("input")
-        previous = getattr(sub, "pipeline_task", None)
-
-        async def _run():
-            # Cancel any still-running pipeline first so a re-run doesn't leave
-            # orphaned PTYs (e.g. an interactive claude) alive in the background.
-            # Await its teardown before starting the new run — this also ensures
-            # the old run's "pipeline_error" is flushed before the new run's
-            # "pipeline_started", so cancellation can't mis-mark the new run.
-            if previous and not previous.done():
-                previous.cancel()
-                try:
-                    await previous
-                except (asyncio.CancelledError, Exception):
-                    pass
-            await PipelineEngine(root, sub, outputs=node_outputs).execute(initial_input)
-
-        # Track the task on the subscriber so "cancel_pipeline" (and the next
-        # run) can cancel it, killing in-flight child PTYs via TerminalNode.
-        sub.pipeline_task = asyncio.create_task(_run())
+        run = _start_pipeline(sub, spec, msg.get("backend"), msg.get("input"),
+                              workspace_id=None, previous=getattr(sub, "run", None))
+        if run is not None:
+            sub.run = run
         return
 
-    if mtype == "cancel_pipeline":
-        task = getattr(sub, "pipeline_task", None)
-        if task and not task.done():
-            task.cancel()
+    if mtype == "run_workspace":
+        # Concurrent path: each workspace has its own keyed run, so running one
+        # doesn't cancel the others. Re-running the SAME workspace overrides its
+        # context (cancels its prior run).
+        wid = msg.get("workspace_id")
+        ws = workspaces.get(wid)
+        if not ws:
+            sub.send({"type": "error", "message": "no such workspace"})
+            return
+        spec = msg.get("pipeline")
+        if not spec:
+            sub.send({"type": "error", "message": "missing pipeline spec"})
+            return
+        runs = _sub_runs(sub)
+        run = _start_pipeline(sub, spec, msg.get("backend"), msg.get("input"),
+                              workspace_id=wid, previous=runs.get(wid))
+        if run is not None:
+            runs[wid] = run
+            ws.run = run  # workspace owns its latest run/context
+        return
+
+    if mtype in ("cancel_pipeline", "cancel_workspace"):
+        wid = msg.get("workspace_id")
+        run = _sub_runs(sub).get(wid) if wid else getattr(sub, "run", None)
+        if run and run.task and not run.task.done():
+            run.task.cancel()
         return
 
     if mtype == "node_input":
         # User steering for a running coordinator agent — route to its inbox.
-        registry = getattr(sub, "agent_inboxes", None) or {}
-        inbox = registry.get(msg.get("node_id"))
+        # workspace_id disambiguates which run owns the node (ids can repeat
+        # across workspaces); falls back to the legacy single run.
+        wid = msg.get("workspace_id")
+        run = _sub_runs(sub).get(wid) if wid else getattr(sub, "run", None)
+        inbox = run.agent_inboxes.get(msg.get("node_id")) if run else None
         if inbox is not None:
             inbox.put_nowait(msg.get("text", ""))
+        return
+
+    # ── Workspace CRUD (each op replies with the full list, the client's
+    #    single source of truth for "what sessions exist") ───────────────────
+    if mtype == "list_workspaces":
+        _send_workspaces(sub)
+        return
+
+    if mtype == "create_workspace":
+        raw_dir = (msg.get("dir") or "").strip()
+        if not raw_dir:
+            sub.send({"type": "error", "message": "workspace requires a directory"})
+            return
+        resolved = _resolve_cwd(raw_dir, None)
+        if not os.path.isdir(resolved):
+            sub.send({"type": "error", "message": f"directory does not exist: {resolved}"})
+            return
+        ws = workspaces.create(raw_dir, msg.get("name"))
+        _send_workspaces(sub, created=ws.id)
+        return
+
+    if mtype == "set_pipeline":
+        workspaces.set_pipeline(msg.get("workspace_id"), msg.get("dsl", ""))
+        _send_workspaces(sub)
+        return
+
+    if mtype == "delete_workspace":
+        workspaces.delete(msg.get("workspace_id"))
+        _send_workspaces(sub)
         return
 
     sess = manager.sessions.get(msg.get("id"))
@@ -280,13 +357,15 @@ async def ws_endpoint(ws: WebSocket):
     except Exception as e:
         print(f"[ws] fatal error: {e!r}")
     finally:
-        # Cancel any in-flight pipeline so a disconnect doesn't leave a
-        # coordinator looping (spending API credits), children running, or an
-        # ask_user wait blocked forever. Cancellation kills child PTYs and runs
-        # each node's cleanup (inbox unregister, finish_virtual).
-        task = getattr(sub, "pipeline_task", None)
-        if task and not task.done():
-            task.cancel()
+        # Cancel every in-flight run (legacy single + all workspace runs) so a
+        # disconnect doesn't leave a coordinator looping (spending API credits),
+        # children running, or an ask_user wait blocked forever. Cancellation
+        # kills child PTYs and runs each node's cleanup (inbox unregister,
+        # finish_virtual).
+        active = [getattr(sub, "run", None), *getattr(sub, "runs", {}).values()]
+        for r in active:
+            if r and r.task and not r.task.done():
+                r.task.cancel()
         manager.detach(sub)
         drain.cancel()
 

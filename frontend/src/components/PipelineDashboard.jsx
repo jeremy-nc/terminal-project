@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useRef } from "react";
-import { runPipeline, cancelPipeline, mountNodeTerm, unmountTab } from "../terminalController.js";
+import React, { useState, useEffect, useMemo, useRef } from "react";
+import { runWorkspace, cancelWorkspace, setWorkspaceDsl, mountNodeTerm, unmountTab } from "../terminalController.js";
 import { parseDsl } from "../pipelineDsl.js";
 import { b64dec } from "../wire.js";
 import OpenInTerminalButton from "./OpenInTerminalButton.jsx";
@@ -30,46 +30,34 @@ function NodeTerminal({ tabId, agentNodeId = null }) {
   return <div className="node-term-host" ref={hostRef} />;
 }
 
-export default function PipelineDashboard({ pipelines, tabs }) {
-  const [specText, setSpecText] = useState(
-    "# Sample Pipeline\n" +
-    "dir: @~/Code/terminal-project\n" +
-    "seq: claude -p \"List three numbers between 0 and 100, comma-separated, numbers only\"\n" +
-    "dyn_batch: claude -p \"In one sentence, share something interesting about the number {{input}}\"\n" +
-    "agent:\n" +
-    "  system: |\n" +
-    "    You are a coordinator. Ask the user to pick the most interesting\n" +
-    "    discovery from the message. Delegate a sub-agent to write a 3-line\n" +
-    "    haiku about it. When it returns, show the user the haiku and use\n" +
-    "    ask_user to ask whether they are happy with it or want a different one.\n" +
-    "    If they want a different one, delegate again with their feedback.\n" +
-    "    Repeat until they are happy, then report the final haiku.\n" +
-    "  prompt: {{input}}\n" +
-    "seq: claude\n" +
-    "# Coordinator loop: pick discovery -> delegate haiku -> ask if you're happy\n" +
-    "# -> re-delegate if not (a new sub-agent card each time) -> finish when happy.\n" +
-    "# NB: don't end with 'bash -c \"echo {{input}}\"' — piping multi-line agent\n" +
-    "# output into a shell lets '> line' blockquotes become file redirections."
-  );
-  const [preview, setPreview] = useState(null);
-  // Backend for this run's pipeline-node sessions: "bare" (plain PTY, shown as
-  // "Default") or "tmux". Interactive tabs are unaffected.
+export default function PipelineDashboard({ workspace, tabs }) {
+  // Backend for this run's pipeline-node sessions: "bare" (plain PTY, "Default")
+  // or "tmux". Per-panel, so each workspace remembers its own choice.
   const [backend, setBackend] = useState("bare");
 
-  const active = pipelines[pipelines.length - 1];
+  // This panel renders exactly one workspace. App keeps every workspace's panel
+  // mounted (hiding inactive via display:none) so node terminals are never
+  // disposed/re-attached on tab switch — re-attaching replays the raw PTY buffer,
+  // which corrupts an interactive TUI (the repeating DA-query garbage).
+  const active = workspace || null;
 
-  // Auto-parse preview on change
-  useEffect(() => {
+  // Parsed preview of the active workspace's DSL — used for the pre-run tree and
+  // as the spec to run.
+  const preview = useMemo(() => {
+    if (!active) return null;
     try {
-      setPreview(parseDsl(specText));
+      return parseDsl(active.dsl || "");
     } catch (e) {
       console.error("Parse error:", e);
+      return null;
     }
-  }, [specText]);
+  }, [active?.id, active?.dsl]);
+
+  // Node-card tab id, namespaced per workspace (matches terminalController).
+  const nt = (nodeId) => (active ? `${active.id}::node-${nodeId}` : null);
 
   // Follow the action: scroll the live tree to a stage's container the first
-  // time one of its terminals starts. currentStage only changes per container,
-  // so this fires once per stage and the user can scroll freely in between.
+  // time one of its terminals starts.
   useEffect(() => {
     const stage = active?.currentStage;
     if (!stage) return;
@@ -78,7 +66,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
   }, [active?.currentStage]);
 
   const handleRun = () => {
-    if (preview) runPipeline(preview, backend);
+    if (active && preview) runWorkspace(active.id, preview, backend);
   };
 
   const renderNode = (node) => {
@@ -128,9 +116,8 @@ export default function PipelineDashboard({ pipelines, tabs }) {
     );
   };
 
-  // Live view mirrors the preview tree: sequences stack vertically (series),
-  // batches lay out horizontally (parallel), and every leaf is an interactive
-  // terminal. Status/session are looked up by spec id from the live pipeline.
+  // Live view mirrors the preview tree, with status/session looked up by spec id
+  // from the active workspace's run state.
   const renderLiveNodeTree = (node) => {
     if (node.type === "sequence") {
       return (
@@ -157,8 +144,6 @@ export default function PipelineDashboard({ pipelines, tabs }) {
     }
 
     if (node.type === "dynamic_batch" || node.type === "fanout") {
-      // Children don't exist in the spec — they're spawned at runtime and
-      // arrive lazily via node_started events, keyed by this node's id.
       const kids = active.childrenByParent?.[node.id] || [];
       const label = node.type === "dynamic_batch" ? "Dynamic Batch · fan-out" : "Fan-out · parallel";
       return (
@@ -169,7 +154,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
               ? <div className="text-faint">Waiting for fan-out…</div>
               : kids.map(child => {
                   const status = active.statusById?.[child.nodeId] || "pending";
-                  const tabId = `node-${child.nodeId}`;
+                  const tabId = nt(child.nodeId);
                   const hasTab = tabs.some(t => t.id === tabId);
                   return (
                     <div
@@ -194,10 +179,8 @@ export default function PipelineDashboard({ pipelines, tabs }) {
 
     if (node.type === "agent") {
       const status = active.statusById?.[node.id] || "pending";
-      const tabId = `node-${node.id}`;
+      const tabId = nt(node.id);
       const hasTab = tabs.some(t => t.id === tabId);
-      // Delegated sub-agents are spawned at runtime and sit in the same row as
-      // the coordinator (dyn_batch-style), so the first delegate is next to it.
       const kids = active.childrenByParent?.[node.id] || [];
       return (
         <div key={node.id} id={`pl-node-${node.id}`} className="node-container batch live">
@@ -217,7 +200,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
             {/* delegated sub-agents — next to the coordinator */}
             {kids.map(child => {
               const cstatus = active.statusById?.[child.nodeId] || "pending";
-              const ctabId = `node-${child.nodeId}`;
+              const ctabId = nt(child.nodeId);
               const chasTab = tabs.some(t => t.id === ctabId);
               return (
                 <div key={child.nodeId} className={`node-container terminal live status-${cstatus} ${cstatus === 'waiting' ? 'pulse' : ''}`}>
@@ -239,7 +222,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
 
     // terminal leaf
     const status = active.statusById?.[node.id] || "pending";
-    const tabId = `node-${node.id}`;
+    const tabId = nt(node.id);
     const hasTab = tabs.some(t => t.id === tabId);
     return (
       <div
@@ -260,45 +243,61 @@ export default function PipelineDashboard({ pipelines, tabs }) {
     );
   };
 
+  const running = active?.status === "running";
+
   return (
     <div className="pipeline-screen">
       <div className="pipeline-sidebar">
-        <div className="sidebar-header">Pipeline Spec</div>
-        <textarea
-          className="dsl-editor"
-          value={specText}
-          onChange={(e) => setSpecText(e.target.value)}
-          spellCheck="false"
-        />
-        <div className="backend-select" role="radiogroup" aria-label="Terminal backend">
-          <span className="backend-label">Terminal</span>
-          {[["bare", "Default"], ["tmux", "tmux"]].map(([value, label]) => (
-            <label key={value} className="backend-option">
-              <input
-                type="radio"
-                name="node-backend"
-                value={value}
-                checked={backend === value}
-                onChange={() => setBackend(value)}
-              />
-              {label}
-            </label>
-          ))}
-        </div>
-        <button className="btn-run" onClick={handleRun} disabled={!!active && active.status === "running"}>
-          {active && active.status === "running" ? "Running..." : "Run Pipeline"}
-        </button>
+        {active ? (
+          <>
+            <div className="sidebar-header" title={active.dir}>Pipeline · {active.name}</div>
+            <textarea
+              className="dsl-editor"
+              value={active.dsl}
+              onChange={(e) => setWorkspaceDsl(active.id, e.target.value)}
+              spellCheck="false"
+              placeholder="seq: claude -p &quot;…&quot;"
+            />
+            <div className="backend-select" role="radiogroup" aria-label="Terminal backend">
+              <span className="backend-label">Terminal</span>
+              {[["bare", "Default"], ["tmux", "tmux"]].map(([value, label]) => (
+                <label key={value} className="backend-option">
+                  <input
+                    type="radio"
+                    name={`node-backend-${active.id}`}
+                    value={value}
+                    checked={backend === value}
+                    onChange={() => setBackend(value)}
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+            <button className="btn-run" onClick={handleRun} disabled={running}>
+              {running ? "Running..." : "Run session"}
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="sidebar-header">Pipeline Spec</div>
+            <div className="text-faint" style={{ padding: "8px 2px" }}>
+              Create a session (the <strong>+</strong> above) to define and run a pipeline.
+            </div>
+          </>
+        )}
       </div>
 
       <div className="pipeline-main">
-        {active ? (
+        {!active ? (
+          <div className="preview-view">
+            <div className="pipeline-header"><span className="pipeline-title">No session</span></div>
+          </div>
+        ) : active.spec ? (
           <div className="active-view">
             <div className="pipeline-header">
-              <span className="pipeline-title">Live Pipeline #{active.id}</span>
+              <span className="pipeline-title">{active.name}</span>
               <span className={`status-pill status-${active.status}`}>{active.status}</span>
-              {active.status === "running" && (
-                <button className="btn-cancel" onClick={cancelPipeline}>Cancel</button>
-              )}
+              {running && <button className="btn-cancel" onClick={() => cancelWorkspace(active.id)}>Cancel</button>}
             </div>
             {active.warnings?.length > 0 && (
               <div className="pipeline-warnings">
@@ -308,11 +307,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
             {active.status === "error" && active.error && (
               <div className="pipeline-error-banner">✕ {active.error}</div>
             )}
-            <div className="live-tree">
-              {active.spec
-                ? renderLiveNodeTree(active.spec)
-                : <div className="text-faint">Waiting for pipeline spec…</div>}
-            </div>
+            <div className="live-tree">{renderLiveNodeTree(active.spec)}</div>
             {active.result && (
               <div className="pipeline-result">
                 <div className="result-label">Final Output</div>
@@ -322,9 +317,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
           </div>
         ) : (
           <div className="preview-view">
-            <div className="pipeline-header">
-              <span className="pipeline-title">Preview</span>
-            </div>
+            <div className="pipeline-header"><span className="pipeline-title">Preview</span></div>
             <div className="node-list">
               {preview?.nodes.map(node => renderNode(node))}
             </div>
@@ -351,9 +344,7 @@ export default function PipelineDashboard({ pipelines, tabs }) {
               ))
           ) : (
             <div className="text-faint">
-              {active && active.status === "running"
-                ? "Outputs appear as each node finishes…"
-                : "Run a pipeline to see each node's output."}
+              {running ? "Outputs appear as each node finishes…" : "Run a session to see each node's output."}
             </div>
           )}
         </div>

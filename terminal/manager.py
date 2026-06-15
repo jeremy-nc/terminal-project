@@ -29,32 +29,29 @@ class SessionManager:
         # loop, buffer, broadcast, resize, and grace-kill below are
         # backend-agnostic.
         self._backend = backend or make_backend()
-        # Backend used for pipeline NODE sessions (capture=True), chosen per-run
-        # via the UI radio. Interactive tabs always use self._backend. Defaults
-        # to the configured backend until the run_pipeline handler selects one.
+        # Selectable backends for pipeline NODE sessions (capture=True), chosen
+        # per-run via the UI radio and passed into create(backend=...). Resolved
+        # per-call so concurrent runs can use different backends without racing.
+        # Interactive tabs always use self._backend.
         self._node_backends = available_backends()
-        self._node_backend = self._backend
-
-    def select_node_backend(self, name: str) -> None:
-        """Pick the backend for pipeline-node sessions ('bare' | 'tmux'); falls
-        back to the configured backend for unknown/unavailable names."""
-        self._node_backend = self._node_backends.get(name) or self._backend
 
     def reset_backend(self) -> None:
         """Discard stale backend state (e.g. a leftover tmux server) so sessions
         pick up the current config. Call once on server startup."""
         self._backend.reset_server()
 
-    def create(self, shell_name: str = None, cols: int = 80, rows: int = 24, argv: list = None, cwd: str = None, capture: bool = False) -> Session:
+    def create(self, shell_name: str = None, cols: int = 80, rows: int = 24, argv: list = None, cwd: str = None, capture: bool = False, backend: str = None) -> Session:
         sid = uuid.uuid4().hex[:8]
         if not argv:
             argv = resolve_shell(shell_name or "bash")
-        # Pipeline nodes (capture) use the UI-selected node backend; interactive
+        # Pipeline nodes (capture) use the per-run backend selected by name
+        # ('bare'|'tmux'), falling back to the configured backend. Interactive
         # tabs always use the configured backend.
-        backend = self._node_backend if capture else self._backend
         if capture:
+            backend = self._node_backends.get(backend) or self._backend
             pid, fd = backend.spawn_captured(sid, argv, cols, rows, cwd)
         else:
+            backend = self._backend
             pid, fd = backend.spawn(sid, argv, cols, rows, cwd)
         sess = Session(sid, fd, pid, cols, rows)
         sess.backend = backend

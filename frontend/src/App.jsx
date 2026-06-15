@@ -7,22 +7,16 @@ import TabBar from "./components/TabBar.jsx";
 import TabStage from "./components/TabStage.jsx";
 import InputBar from "./components/InputBar.jsx";
 import PipelineDashboard from "./components/PipelineDashboard.jsx";
+import WorkspaceTabBar from "./components/WorkspaceTabBar.jsx";
 
 export default function App() {
-  const { status, tabs, activeTabId, pipelines } = useSyncExternalStore(subscribe, getSnapshot);
+  const { status, tabs, activeTabId, workspaces, activeWorkspaceId } = useSyncExternalStore(subscribe, getSnapshot);
   const [view, setView] = useState("terminal"); // "terminal" | "pipeline"
 
-  // Open the first tab once the WebSocket is open.
+  // Open the first interactive tab once the WebSocket is open.
   useEffect(() => {
-    if (status === "open" && tabs.length === 0) newTab();
-  }, [status, tabs.length]);
-
-  // If a pipeline starts, maybe switch to pipeline view automatically
-  useEffect(() => {
-    if (pipelines.length > 0 && pipelines[pipelines.length - 1].status === "running") {
-      setView("pipeline");
-    }
-  }, [pipelines.length]);
+    if (status === "open" && tabs.filter(t => !t.isNode).length === 0) newTab();
+  }, [status, tabs]);
 
   // Refit active terminal on window resize.
   useEffect(() => {
@@ -85,7 +79,25 @@ export default function App() {
           className="pipeline-view-wrap"
           style={{ display: view === "pipeline" ? "flex" : "none" }}
         >
-          <PipelineDashboard pipelines={pipelines} tabs={tabs} />
+          <WorkspaceTabBar workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} />
+          <div className="ws-panels">
+            {workspaces.length === 0 ? (
+              <div className="ws-empty">Create a session (+) to define and run a pipeline.</div>
+            ) : (
+              // Every workspace's panel stays mounted; only the active one is
+              // shown. Hiding (not unmounting) keeps each panel's node terminals
+              // alive across tab switches — no lossy re-attach/replay.
+              workspaces.map((w) => (
+                <div
+                  key={w.id}
+                  className="ws-panel"
+                  style={{ display: w.id === activeWorkspaceId ? "flex" : "none" }}
+                >
+                  <PipelineDashboard workspace={w} tabs={tabs} />
+                </div>
+              ))
+            )}
+          </div>
         </div>
 
         <div

@@ -14,15 +14,28 @@ const WS_URL = `${location.protocol === "https:" ? "wss" : "ws"}://${location.ho
 // ── state shape ─────────────────────────────────────────────────────────────
 let _state = {
   status: "connecting", // "connecting" | "open" | "closed"
-  tabs: [],             // [{ id, title, sessionId, status }]
+  tabs: [],             // interactive shells + pipeline node cards (isNode, workspaceId)
   activeTabId: null,
-  pipelines: [],        // [{ id, status, spec, statusById, sessionById, result }]
+  // Workspaces ("sessions"): each is a persisted definition (id/name/dir/dsl)
+  // PLUS its live run state, updated by events routed via workspace_id. Several
+  // can run concurrently; the dashboard renders the active one.
+  workspaces: [],       // [{ id, name, dir, dsl, status, spec, statusById, sessionById, childrenByParent, outputs, result, warnings, error, currentStage }]
+  activeWorkspaceId: null,
 };
 
 let _tabCounter = 0;
-// Spec submitted by the most recent runPipeline(), attached to the pipeline
-// entry when the server confirms with "pipeline_started".
-let _pendingSpec = null;
+
+// Node-card tab id, namespaced per workspace so the same node id (n0, n1/0, …)
+// in two concurrent workspaces never collides in the tabs list or _terms map.
+function _nodeTabId(wid, nodeId) { return `${wid}::node-${nodeId}`; }
+
+function _blankRunState() {
+  return {
+    status: "idle", spec: null, statusById: {}, sessionById: {},
+    childrenByParent: {}, outputs: {}, result: null,
+    warnings: [], error: null, currentStage: null,
+  };
+}
 
 // ── internal registries ──────────────────────────────────────────────────────
 const _terms = new Map();    // tabId → { main: Terminal, mirror: Terminal, mainFit, mirrorFit }
@@ -41,6 +54,30 @@ function _patchTab(tabId, patch) {
   _setState({
     tabs: _state.tabs.map((t) => (t.id === tabId ? { ...t, ...patch } : t)),
   });
+}
+
+// Update one workspace's run state by id. `patch` may be an object or a
+// function (prev) => patch, like a React reducer.
+function _patchWorkspace(wid, patch) {
+  _setState({
+    workspaces: _state.workspaces.map((w) =>
+      w.id === wid ? { ...w, ...(typeof patch === "function" ? patch(w) : patch) } : w
+    ),
+  });
+}
+
+// Drop a workspace's node cards + their session routing (on (re-)run, so the
+// new run's cards re-mount fresh and attach to the new sessions).
+function _clearWorkspaceNodeTabs(wid) {
+  const kept = [];
+  for (const t of _state.tabs) {
+    if (t.isNode && t.workspaceId === wid) {
+      if (t.sessionId) _bySession.delete(t.sessionId);
+    } else {
+      kept.push(t);
+    }
+  }
+  _setState({ tabs: kept });
 }
 
 // ── WebSocket ────────────────────────────────────────────────────────────────
@@ -63,9 +100,11 @@ function _connect() {
 
   _ws.onopen = () => {
     _setState({ status: "open" });
-    // Reopen any tabs that were waiting (e.g. after reconnect)
+    // Fetch the persisted workspace list (definitions) for the pipeline view.
+    _send({ type: "list_workspaces" });
+    // Reopen any interactive tabs that were waiting (e.g. after reconnect)
     for (const t of _state.tabs) {
-      if (t.status === "starting") _sendStart(t.id);
+      if (t.status === "starting" && !t.isNode) _sendStart(t.id);
     }
   };
 
@@ -132,155 +171,98 @@ function _handleMsg(msg) {
       if (tabId) _patchTab(tabId, { status: "exited" });
       break;
     }
+    case "workspace_list": {
+      // The server's source of truth for which workspaces exist. Merge in
+      // definitions, preserving each existing workspace's live run state and
+      // its locally-edited dsl (only newly-appearing ones adopt the server dsl).
+      const defs = msg.workspaces || [];
+      const existing = new Map(_state.workspaces.map((w) => [w.id, w]));
+      const merged = defs.map((d) =>
+        existing.has(d.id)
+          ? { ...existing.get(d.id), name: d.name, dir: d.dir }
+          : { id: d.id, name: d.name, dir: d.dir, dsl: d.dsl || "", ..._blankRunState() }
+      );
+      let active = msg.created || _state.activeWorkspaceId;
+      if (!merged.find((w) => w.id === active)) active = merged[0]?.id ?? null;
+      _setState({ workspaces: merged, activeWorkspaceId: active });
+      break;
+    }
     case "pipeline_started": {
-      // Re-runs reuse node ids (n1/0, n1/1, …), so the previous run's node
-      // tabs must be cleared — otherwise node_started sees the tab already
-      // exists, skips registration, and the new run's children never render.
-      _state.tabs.forEach((t) => {
-        if (t.isNode && t.sessionId) _bySession.delete(t.sessionId);
-      });
-      const keptTabs = _state.tabs.filter((t) => !t.isNode);
-      // Attach the spec submitted by runPipeline() so the live view can render
-      // the same hierarchical tree as the preview. Status/session are keyed by
-      // each node's spec id (node_id), filled in as node events arrive.
-      _setState({
-        tabs: keptTabs,
-        pipelines: [
-          ..._state.pipelines,
-          {
-            id: Date.now(),
-            status: "running",
-            spec: _pendingSpec,
-            statusById: {},
-            sessionById: {},
-            // Runtime-discovered children keyed by parent node id (fan-out): the
-            // dynamic subtree isn't in the spec, so it's grown from node events.
-            childrenByParent: {},
-            warnings: [],
-            error: null,
-            result: null,
-            currentStage: null,
-          },
-        ],
-      });
+      const wid = msg.workspace_id;
+      if (!wid) break;
+      // Re-runs reuse node ids, so clear the previous run's node cards first.
+      _clearWorkspaceNodeTabs(wid);
+      _patchWorkspace(wid, (w) => ({ ..._blankRunState(), spec: w.spec, status: "running" }));
       break;
     }
     case "pipeline_finished": {
       // msg.outputs is the coordinator's full map: { node_id: {output(b64), exit_code} }
-      _setState({
-        pipelines: _state.pipelines.map((p) =>
-          p.status === "running"
-            ? { ...p, status: "finished", result: msg.result, outputs: msg.outputs || {} }
-            : p
-        ),
-      });
+      _patchWorkspace(msg.workspace_id, { status: "finished", result: msg.result, outputs: msg.outputs || {} });
       break;
     }
     case "pipeline_error": {
-      // Backend stopped the coordinator (build error, structurer failure, or
-      // cancellation). Move the live pipeline to a terminal error state so the
-      // UI doesn't sit on "running" forever.
-      _setState({
-        pipelines: _state.pipelines.map((p) =>
-          p.status === "running" ? { ...p, status: "error", error: msg.message } : p
-        ),
-      });
+      _patchWorkspace(msg.workspace_id, { status: "error", error: msg.message });
       break;
     }
     case "node_warning": {
-      _setState({
-        pipelines: _state.pipelines.map((p) =>
-          p.status === "running" ? { ...p, warnings: [...(p.warnings || []), msg.message] } : p
-        ),
-      });
+      _patchWorkspace(msg.workspace_id, (w) => ({ warnings: [...(w.warnings || []), msg.message] }));
       break;
     }
     case "node_started": {
       // Only terminal (leaf) nodes own a live session; batch/sequence wrappers
-      // are drawn from the spec tree, not from events.
-      // Internal plumbing nodes (e.g. the dynamic-batch structurer) run
-      // server-side but are never surfaced as cards.
-      if (msg.node_type === "terminal" && !msg.internal) {
+      // are drawn from the spec tree. Internal plumbing nodes (e.g. the
+      // dynamic-batch structurer) run server-side but aren't surfaced as cards.
+      const wid = msg.workspace_id;
+      if (msg.node_type === "terminal" && !msg.internal && wid) {
         const nodeId = msg.node_id;
         const parentId = msg.node_id != null ? msg.parent_id : null;
-        const tabId = `node-${nodeId}`;
-        if (!_state.tabs.find(t => t.id === tabId)) {
-          const tab = { id: tabId, title: `Job ${nodeId}`, sessionId: msg.id, status: "running", isNode: true };
+        const tabId = _nodeTabId(wid, nodeId);
+        if (!_state.tabs.find((t) => t.id === tabId)) {
+          const tab = { id: tabId, title: `Job ${nodeId}`, sessionId: msg.id, status: "running", isNode: true, workspaceId: wid, nodeId };
           _bySession.set(msg.id, tabId);
-          _setState({
-            tabs: [..._state.tabs, tab],
-            pipelines: _state.pipelines.map(p =>
-              p.status === "running"
-                ? {
-                    ...p,
-                    statusById: { ...p.statusById, [nodeId]: "running" },
-                    sessionById: { ...p.sessionById, [nodeId]: msg.id },
-                    // Runtime-spawned fan-out children carry a parent_id; record
-                    // them under that parent so the live view can nest them.
-                    childrenByParent: parentId != null
-                      ? {
-                          ...p.childrenByParent,
-                          [parentId]: [
-                            ...(p.childrenByParent?.[parentId] || []).filter(c => c.nodeId !== nodeId),
-                            { nodeId, argv: msg.argv, sessionId: msg.id },
-                          ],
-                        }
-                      : (p.childrenByParent || {}),
-                    // Top-level stage of the just-started node. Only changes
-                    // when a new container lights up, so the view scrolls to it
-                    // once and then leaves the user alone until the next stage.
-                    currentStage: _stageContaining(p.spec, nodeId) || p.currentStage,
-                  }
-                : p
-            ),
-          });
+          _setState({ tabs: [..._state.tabs, tab] });
+          _patchWorkspace(wid, (w) => ({
+            statusById: { ...w.statusById, [nodeId]: "running" },
+            sessionById: { ...w.sessionById, [nodeId]: msg.id },
+            // Runtime-spawned fan-out children carry a parent_id; nest under it.
+            childrenByParent: parentId != null
+              ? { ...w.childrenByParent, [parentId]: [
+                  ...(w.childrenByParent?.[parentId] || []).filter((c) => c.nodeId !== nodeId),
+                  { nodeId, argv: msg.argv, sessionId: msg.id },
+                ] }
+              : (w.childrenByParent || {}),
+            currentStage: _stageContaining(w.spec, nodeId) || w.currentStage,
+          }));
         }
       }
       break;
     }
     case "node_finished": {
       // Wrapper (batch/sequence) finishes carry no node_id; ignore those here.
-      if (msg.node_id == null) break;
-      _setState({
-        pipelines: _state.pipelines.map(p =>
-          p.status === "running"
-            ? {
-                ...p,
-                statusById: { ...p.statusById, [msg.node_id]: "finished" },
-                // Fill the per-node output view incrementally; wrappers and
-                // internal nodes don't carry an output.
-                outputs: msg.output != null
-                  ? { ...(p.outputs || {}), [msg.node_id]: { output: msg.output, exit_code: msg.exit_code } }
-                  : (p.outputs || {}),
-              }
-            : p
-        ),
-      });
+      const wid = msg.workspace_id;
+      if (msg.node_id == null || !wid) break;
+      _patchWorkspace(wid, (w) => ({
+        statusById: { ...w.statusById, [msg.node_id]: "finished" },
+        outputs: msg.output != null
+          ? { ...(w.outputs || {}), [msg.node_id]: { output: msg.output, exit_code: msg.exit_code } }
+          : (w.outputs || {}),
+      }));
       break;
     }
     case "needs_input": {
       const tabId = _bySession.get(msg.id);
       if (tabId) _patchTab(tabId, { needsInput: true });
-      if (msg.node_id != null) {
-        _setState({
-          pipelines: _state.pipelines.map(p => ({
-            ...p,
-            statusById: { ...p.statusById, [msg.node_id]: "waiting" },
-          })),
-        });
+      const wid = msg.workspace_id;
+      if (msg.node_id != null && wid) {
+        _patchWorkspace(wid, (w) => ({ statusById: { ...w.statusById, [msg.node_id]: "waiting" } }));
       }
       break;
     }
     case "node_status": {
       // Explicit status transition (e.g. a coordinator resuming after ask_user).
-      if (msg.node_id == null) break;
-      _setState({
-        pipelines: _state.pipelines.map(p =>
-          p.status === "running"
-            ? { ...p, statusById: { ...p.statusById, [msg.node_id]: msg.status } }
-            : p
-        ),
-      });
+      const wid = msg.workspace_id;
+      if (msg.node_id == null || !wid) break;
+      _patchWorkspace(wid, (w) => ({ statusById: { ...w.statusById, [msg.node_id]: msg.status } }));
       break;
     }
     case "error":
@@ -409,7 +391,8 @@ export function mountNodeTerm(tabId, host, agentNodeId = null) {
       for (const ch of data) {
         if (ch === "\r" || ch === "\n") {
           main.write("\r\n");
-          if (_line.trim()) sendNodeInput(agentNodeId, _line);
+          // tabId is `${workspaceId}::node-${nodeId}` — route to the right run.
+          if (_line.trim()) sendNodeInput(tabId.split("::")[0], agentNodeId, _line);
           _line = "";
         } else if (ch === "\x7f" || ch === "\b") {
           if (_line.length) { _line = _line.slice(0, -1); main.write("\b \b"); }
@@ -438,23 +421,43 @@ export function mountNodeTerm(tabId, host, agentNodeId = null) {
 }
 
 
-export function runPipeline(spec, backend = "bare") {
-  // Remember the spec so the live view can render its tree once the server
-  // confirms with "pipeline_started". `backend` selects the node backend
-  // ("bare" = plain PTY / "Default", or "tmux").
-  _pendingSpec = spec;
-  _send({ type: "run_pipeline", pipeline: spec, backend });
+// ── workspace ("session") actions ────────────────────────────────────────────
+export function createWorkspace(dir, name) {
+  _send({ type: "create_workspace", dir, name });
 }
 
-export function cancelPipeline() {
-  // The server cancels the running task, which kills any in-flight child PTYs
-  // and emits "pipeline_error" back so the UI reflects the stop.
-  _send({ type: "cancel_pipeline" });
+export function deleteWorkspace(wid) {
+  cancelWorkspace(wid);
+  _clearWorkspaceNodeTabs(wid);
+  _send({ type: "delete_workspace", workspace_id: wid });
 }
 
-/** Steer a running coordinator agent — routed to its inbox by node_id. */
-export function sendNodeInput(nodeId, text) {
-  _send({ type: "node_input", node_id: nodeId, text });
+export function selectWorkspace(wid) {
+  _setState({ activeWorkspaceId: wid });
+  setTimeout(refitNodes, 0); // the now-visible workspace's node terminals
+}
+
+export function setWorkspaceDsl(wid, dsl) {
+  // Local edit is the editor's source of truth; persist it to the server.
+  _patchWorkspace(wid, { dsl });
+  _send({ type: "set_pipeline", workspace_id: wid, dsl });
+}
+
+export function runWorkspace(wid, spec, backend = "bare") {
+  // Attach the parsed spec so the live tree renders once "pipeline_started"
+  // arrives. `backend` selects the node backend ("bare" plain PTY, or "tmux").
+  _patchWorkspace(wid, { spec });
+  _send({ type: "run_workspace", workspace_id: wid, pipeline: spec, backend });
+}
+
+export function cancelWorkspace(wid) {
+  // Server cancels the run, kills in-flight child PTYs, emits "pipeline_error".
+  _send({ type: "cancel_workspace", workspace_id: wid });
+}
+
+/** Steer a running coordinator agent — routed to its inbox by (workspace, node). */
+export function sendNodeInput(workspaceId, nodeId, text) {
+  _send({ type: "node_input", workspace_id: workspaceId, node_id: nodeId, text });
 }
 
 /** Launch a session in the real macOS Terminal. The server's active backend
@@ -556,7 +559,7 @@ export function fitActive() {
  *  becomes visible again after being display:none. */
 export function refitNodes() {
   for (const tabId of _terms.keys()) {
-    if (tabId.startsWith("node-")) fitTab(tabId);
+    if (tabId.includes("::node-")) fitTab(tabId);
   }
 }
 

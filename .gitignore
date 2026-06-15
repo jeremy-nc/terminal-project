@@ -23,3 +23,4 @@ frontend/dist/
 # Temp / nohup
 nohup.out
 /tmp/
+workspaces.json

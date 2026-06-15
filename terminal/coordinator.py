@@ -168,7 +168,10 @@ class TerminalNode(Node):
         # screen (good for the live card + native attach); read_capture() below
         # returns the clean stdout for piping. Under the bare backend the PTY
         # stream is already clean and read_capture() returns None.
-        sess = self.manager.create(cols=self.cols, rows=self.rows, argv=argv, cwd=self.cwd, capture=True)
+        # The run's backend choice lives on the event bus (PipelineRun); pass it
+        # per-call so concurrent runs can use different backends.
+        sess = self.manager.create(cols=self.cols, rows=self.rows, argv=argv, cwd=self.cwd,
+                                   capture=True, backend=getattr(self.event_bus, "node_backend", None))
         self.current_session_id = sess.id
         self.manager.attach(sess, sub)
 

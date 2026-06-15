@@ -83,6 +83,28 @@ instructing the LLM.
 - Conflict handling if the file changes on disk outside the editor.
 
 
+### Workspace directory → git worktree management
+A Workspace already stores (and validates) a `dir`, but it's currently **unused**
+at runtime — the pipeline's cwd still comes from the DSL `dir:`. Future: make
+`workspace.dir` a **git worktree** so each workspace/session operates on an
+isolated checkout of the repo, letting concurrent sessions run in parallel
+without stepping on each other's files.
+
+**Concept:**
+- On create, optionally `git worktree add <dir> <branch>` (or attach to an
+  existing dir); on delete, `git worktree remove`/prune.
+- When the workspace runs, its pipeline's global cwd becomes the worktree dir
+  (so the `dir` finally "does something").
+- Pairs naturally with multi-session: N workspaces = N worktrees = N parallel
+  agent sessions on the same repo, isolated.
+
+**Open questions:**
+- Auto-create a worktree+branch per workspace, or let the user point at an
+  existing directory (worktree or not)?
+- Branch naming / lifecycle (delete the branch on workspace delete?).
+- Guard against running two workspaces against the *same* dir.
+
+
 ### Agent Skills Browser
 Fetch a popular public repo of agent skills and display the available skills in
 a browsable list in the UI.

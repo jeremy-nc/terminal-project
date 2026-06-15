@@ -259,7 +259,70 @@ html, body { background: var(--bg); }
   flex: 1;
   min-width: 0;
   min-height: 0;
+  flex-direction: column; /* workspace tab bar on top, dashboard fills below */
 }
+
+/* ── workspace ("session") tabs ─────────────────────────── */
+.ws-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+.ws-tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 12.5px;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+  transition: background var(--dur) var(--ease), color var(--dur) var(--ease),
+              border-color var(--dur) var(--ease);
+}
+.ws-tab:hover { background: var(--surface-hover); color: var(--text); }
+.ws-tab.active {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border-strong);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+.ws-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  background: var(--text-faint); flex-shrink: 0;
+}
+.ws-dot.status-running { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.ws-dot.status-waiting { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+.ws-dot.status-finished { background: var(--success); }
+.ws-dot.status-error { background: var(--danger); }
+.ws-tab-title { pointer-events: none; }
+.ws-close {
+  background: none; border: none; color: var(--text-faint);
+  font-size: 15px; line-height: 1; cursor: pointer; padding: 0 2px; border-radius: 4px;
+}
+.ws-close:hover { color: var(--text); background: rgba(255,255,255,0.06); }
+.ws-new {
+  background: transparent; color: var(--text-muted);
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  font-size: 16px; line-height: 1; cursor: pointer; padding: 3px 9px; flex-shrink: 0;
+}
+.ws-new:hover { color: var(--text); border-color: var(--border-strong); }
+
+/* Stack of per-workspace dashboards; only the active one is shown (the rest are
+   display:none so their node terminals stay mounted, never re-attached). */
+.ws-panels { flex: 1; min-width: 0; min-height: 0; display: flex; }
+.ws-panel { flex: 1; min-width: 0; min-height: 0; }
+.ws-panel > .pipeline-screen { flex: 1; }
+.ws-empty { flex: 1; display: flex; align-items: center; justify-content: center;
+  color: var(--text-faint); font-size: 13px; }
 .main-pane {
   flex: 1;
   min-width: 0;

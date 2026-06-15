@@ -15,10 +15,14 @@ PipelineEngine respectively.
 
 
 class PipelineRun:
-    def __init__(self, transport, node_backend: str = None, workspace_id: str = None):
+    def __init__(self, transport, node_backend: str = None, workspace_id: str = None, spec: dict = None):
         self._transport = transport
         # UI backend choice for this run's node sessions ("bare" | "tmux" | None).
         self.node_backend = node_backend
+        # The parsed pipeline spec, broadcast on pipeline_started so every window
+        # (and a late-joining sync) can render the live tree — not just the one
+        # that clicked Run.
+        self.spec = spec
         # Routing key: stamped onto every event so the client routes it to the
         # right workspace tab. None = legacy single-pipeline path (no stamp).
         self.workspace_id = workspace_id
@@ -29,15 +33,25 @@ class PipelineRun:
         # node_id -> live session id, so a shared deep-link can resolve a node to
         # its session and attach to it. Learned from node_started events.
         self.node_sessions = {}
+        # Lifecycle events emitted so far (stamped), replayed to a window that
+        # joins mid-run so it reconstructs the live tree — same idea as the PTY
+        # ring buffer, but for pipeline events. Bounded by node count (stdout is
+        # NOT here; it flows via each node session's own subscribers).
+        self.event_log = []
         # The asyncio.Task executing this run (set by the caller after create).
         self.task = None
 
     def send(self, event: dict) -> None:
-        """Forward a domain/transport event to the connection transport, stamped
-        with this run's workspace_id so the client routes it to the right tab.
-        Concurrent runs each have their own bus, so events never cross wires."""
+        """Stamp the event with this run's workspace_id, record it for late-join
+        replay, and forward to the transport (a Hub that broadcasts to every
+        connected window). Concurrent runs each have their own bus + workspace_id,
+        so events never cross wires."""
         if event.get("type") == "node_started" and event.get("node_id") is not None and event.get("id"):
             self.node_sessions[event["node_id"]] = event["id"]
         if self.workspace_id is not None:
             event = {**event, "workspace_id": self.workspace_id}
+        # Carry the spec on pipeline_started so any window can build the live tree.
+        if event.get("type") == "pipeline_started" and self.spec is not None:
+            event = {**event, "spec": self.spec}
+        self.event_log.append(event)
         self._transport.send(event)

@@ -335,9 +335,17 @@ html, body { background: var(--bg); }
 .ws-empty { flex: 1; display: flex; align-items: center; justify-content: center;
   color: var(--text-faint); font-size: 13px; }
 
-/* ── shared single-node deep-link page ──────────────────── */
+/* ── Share view (focused single node) ───────────────────── */
+.share-view-wrap { flex: 1; min-width: 0; min-height: 0; flex-direction: column; }
+.share-empty {
+  flex: 1; display: flex; flex-direction: column; gap: 8px;
+  align-items: center; justify-content: center; text-align: center; padding: 24px;
+}
+.share-empty-title { font-size: 16px; font-weight: 600; color: var(--text); }
+.share-empty-sub { font-size: 13px; color: var(--text-muted); max-width: 420px; }
+
 .shared-view {
-  height: 100vh; display: flex; flex-direction: column;
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
   background: var(--bg); color: var(--text);
 }
 .shared-head {
@@ -778,13 +786,18 @@ html, body { background: var(--bg); }
    coordinator) can never push the row past the viewport, which flex's
    content-driven min sizing let happen. auto-fit fills the row when there are
    few cards and wraps to new rows as more appear, each getting narrower. */
+/* Fan-out cards (batch / dynamic-batch / agent delegates) all sit on ONE row:
+   one auto column per card, each an equal fraction of the width. As more workers
+   appear, every card gets proportionally narrower instead of wrapping. */
 .node-children.parallel {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   align-items: stretch; /* equal-height cards */
 }
 /* Grid items default to min-width:auto (min-content); reset so the card clips
-   to its track instead of overflowing it. */
+   to its track (its 80-col terminal is overflow:hidden) instead of forcing the
+   row wider as it narrows. */
 .node-children.parallel > .node-container.terminal {
   min-width: 0;
 }

@@ -92,8 +92,56 @@ def _replay_data(sess) -> bytes:
     return _QUERY_RE.sub(b"", sess.snapshot())
 
 
+class Hub:
+    """Registry of connected transports, for broadcasting SHARED state to every
+    open window so a new window mirrors the others: terminal/workspace lists and
+    pipeline lifecycle events. (Per-session PTY output already fans out via
+    Session.subscribers; this is for the cross-session events.)"""
+    def __init__(self):
+        self._subs = set()
+
+    def add(self, sub):
+        self._subs.add(sub)
+
+    def remove(self, sub):
+        self._subs.discard(sub)
+
+    def empty(self) -> bool:
+        return not self._subs
+
+    def send(self, event: dict) -> None:
+        for s in list(self._subs):
+            s.send(event)
+
+
 manager = SessionManager()
 workspaces = WorkspaceStore(WORKSPACES_FILE)
+hub = Hub()
+
+# Shared interactive-terminal registry (the Terminal-view tabs), mirrored to all
+# windows. Each entry's id is a live PTY session owned by `manager`.
+terminals = []   # [{"id": session_id, "title": str}]
+_term_counter = 0
+
+
+def _terminal_list_event() -> dict:
+    return {"type": "terminal_list", "terminals": [dict(t) for t in terminals]}
+
+
+def _create_terminal(shell: str, cols: int, rows: int):
+    global _term_counter
+    sess = manager.create(shell, cols, rows)
+    _term_counter += 1
+    terminals.append({"id": sess.id, "title": f"bash #{_term_counter}"})
+    return sess
+
+
+def _workspace_list_event(created: str = None) -> dict:
+    return {
+        "type": "workspace_list",
+        "workspaces": [w.to_json() for w in workspaces.list()],
+        "created": created,
+    }
 
 
 @asynccontextmanager
@@ -171,14 +219,6 @@ def _validate_cwds(spec: dict, global_cwd: str = None) -> str:
     return None
 
 
-def _sub_runs(sub: Subscriber) -> dict:
-    """The connection's workspace runs, keyed by workspace_id (lazily created)."""
-    runs = getattr(sub, "runs", None)
-    if runs is None:
-        runs = sub.runs = {}
-    return runs
-
-
 def _workspace_run(sub: Subscriber, wid: str):
     """The live run for a workspace — resolved GLOBALLY via the workspace store
     (ws.run), so any connection (e.g. a shared deep-link) can reach a running
@@ -190,14 +230,15 @@ def _workspace_run(sub: Subscriber, wid: str):
     return getattr(sub, "run", None)
 
 
-def _start_pipeline(sub, spec, backend, initial_input, workspace_id, previous):
-    """Validate, build, and kick off a pipeline run as a task. Returns the
-    PipelineRun (task set), or None if validation/build failed (error sent)."""
+def _start_pipeline(sub, transport, spec, backend, initial_input, workspace_id, previous):
+    """Validate, build, and kick off a pipeline run as a task. ``transport`` is
+    the run's event bus (the Hub, so events broadcast to every window); ``sub`` is
+    only for error replies. Returns the PipelineRun, or None on failure."""
     cwd_error = _validate_cwds(spec)
     if cwd_error:
         sub.send({"type": "error", "message": cwd_error})
         return None
-    run = PipelineRun(sub, node_backend=backend, workspace_id=workspace_id)
+    run = PipelineRun(transport, node_backend=backend, workspace_id=workspace_id, spec=spec)
     try:
         root = build_node_tree(spec, manager, run, outputs=run.node_outputs)
     except Exception as e:
@@ -218,16 +259,6 @@ def _start_pipeline(sub, spec, backend, initial_input, workspace_id, previous):
 
     run.task = asyncio.create_task(_run())
     return run
-
-
-def _send_workspaces(sub: Subscriber, created: str = None) -> None:
-    """Send the full workspace list (definitions). ``created`` flags a just-made
-    one so the client can auto-select it."""
-    sub.send({
-        "type": "workspace_list",
-        "workspaces": [w.to_json() for w in workspaces.list()],
-        "created": created,
-    })
 
 
 def handle_msg(sub: Subscriber, msg: dict) -> None:
@@ -256,16 +287,17 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         if not spec:
             sub.send({"type": "error", "message": "missing pipeline spec"})
             return
-        run = _start_pipeline(sub, spec, msg.get("backend"), msg.get("input"),
+        run = _start_pipeline(sub, sub, spec, msg.get("backend"), msg.get("input"),
                               workspace_id=None, previous=getattr(sub, "run", None))
         if run is not None:
             sub.run = run
         return
 
     if mtype == "run_workspace":
-        # Concurrent path: each workspace has its own keyed run, so running one
-        # doesn't cancel the others. Re-running the SAME workspace overrides its
-        # context (cancels its prior run).
+        # Concurrent path: each workspace has its own run, owned by the workspace
+        # (ws.run) and broadcast to ALL windows via the Hub — so any window
+        # mirrors it live. Re-running a workspace overrides its context (cancels
+        # its prior run).
         wid = msg.get("workspace_id")
         ws = workspaces.get(wid)
         if not ws:
@@ -275,11 +307,9 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         if not spec:
             sub.send({"type": "error", "message": "missing pipeline spec"})
             return
-        runs = _sub_runs(sub)
-        run = _start_pipeline(sub, spec, msg.get("backend"), msg.get("input"),
-                              workspace_id=wid, previous=runs.get(wid))
+        run = _start_pipeline(sub, hub, spec, msg.get("backend"), msg.get("input"),
+                              workspace_id=wid, previous=ws.run)
         if run is not None:
-            runs[wid] = run
             ws.run = run  # workspace owns its latest run/context
         return
 
@@ -322,10 +352,54 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         })
         return
 
-    # ── Workspace CRUD (each op replies with the full list, the client's
-    #    single source of truth for "what sessions exist") ───────────────────
+    # ── State sync (new window) ──────────────────────────────────────────────
+    if mtype == "sync":
+        # A freshly-opened window: hand it the shared lists, then replay each
+        # running run's event log so it reconstructs the live trees. Live events
+        # follow via the Hub. (Node terminal output then comes from each session's
+        # own subscribers as the window attaches per node card.)
+        sub.send(_terminal_list_event())
+        sub.send(_workspace_list_event())
+        for ws in workspaces.list():
+            run = ws.run
+            if run and run.task and not run.task.done():
+                for ev in list(run.event_log):
+                    sub.send(ev)
+        return
+
+    # ── Shared interactive terminals (mirrored to every window) ──────────────
+    if mtype == "list_terminals":
+        sub.send(_terminal_list_event())
+        return
+
+    if mtype == "create_terminal":
+        _create_terminal(msg.get("shell", "bash"), int(msg.get("cols", 80)), int(msg.get("rows", 24)))
+        hub.send(_terminal_list_event())
+        return
+
+    if mtype == "close_terminal":
+        tid = msg.get("id")
+        s = manager.sessions.get(tid)
+        if s:
+            manager.kill(s)
+        terminals[:] = [t for t in terminals if t["id"] != tid]
+        hub.send(_terminal_list_event())
+        return
+
+    if mtype == "restart_terminal":
+        entry = next((t for t in terminals if t["id"] == msg.get("id")), None)
+        if entry:
+            old = manager.sessions.get(entry["id"])
+            if old:
+                manager.kill(old)
+            s = manager.create("bash", int(msg.get("cols", 80)), int(msg.get("rows", 24)))
+            entry["id"] = s.id  # keep the title; swap to the fresh session
+            hub.send(_terminal_list_event())
+        return
+
+    # ── Workspace CRUD (broadcast so every window's session list stays in sync) ─
     if mtype == "list_workspaces":
-        _send_workspaces(sub)
+        sub.send(_workspace_list_event())
         return
 
     if mtype == "create_workspace":
@@ -338,17 +412,17 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             sub.send({"type": "error", "message": f"directory does not exist: {resolved}"})
             return
         ws = workspaces.create(raw_dir, msg.get("name"))
-        _send_workspaces(sub, created=ws.id)
+        hub.send(_workspace_list_event(created=ws.id))
         return
 
     if mtype == "set_pipeline":
         workspaces.set_pipeline(msg.get("workspace_id"), msg.get("dsl", ""))
-        _send_workspaces(sub)
+        hub.send(_workspace_list_event())
         return
 
     if mtype == "delete_workspace":
         workspaces.delete(msg.get("workspace_id"))
-        _send_workspaces(sub)
+        hub.send(_workspace_list_event())
         return
 
     sess = manager.sessions.get(msg.get("id"))
@@ -401,6 +475,7 @@ async def _drain(ws: WebSocket, sub: Subscriber) -> None:
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     sub = Subscriber()
+    hub.add(sub)  # receive broadcast state/run events
     drain = asyncio.create_task(_drain(ws, sub))
     try:
         while True:
@@ -421,17 +496,21 @@ async def ws_endpoint(ws: WebSocket):
     except Exception as e:
         print(f"[ws] fatal error: {e!r}")
     finally:
-        # Cancel every in-flight run (legacy single + all workspace runs) so a
-        # disconnect doesn't leave a coordinator looping (spending API credits),
-        # children running, or an ask_user wait blocked forever. Cancellation
-        # kills child PTYs and runs each node's cleanup (inbox unregister,
-        # finish_virtual).
-        active = [getattr(sub, "run", None), *getattr(sub, "runs", {}).values()]
-        for r in active:
-            if r and r.task and not r.task.done():
-                r.task.cancel()
+        # The legacy single run is connection-scoped — cancel it. Workspace runs
+        # are SHARED (workspace-owned, broadcast), so another window may still be
+        # watching: only cancel them once NO windows remain, to avoid leaving a
+        # coordinator looping (spending API credits) with no viewers.
+        legacy = getattr(sub, "run", None)
+        if legacy and legacy.task and not legacy.task.done():
+            legacy.task.cancel()
+        hub.remove(sub)
         manager.detach(sub)
         drain.cancel()
+        if hub.empty():
+            for ws in workspaces.list():
+                run = ws.run
+                if run and run.task and not run.task.done():
+                    run.task.cancel()
 
 
 if __name__ == "__main__":

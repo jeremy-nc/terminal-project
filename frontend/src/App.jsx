@@ -1,4 +1,4 @@
-import React, { useSyncExternalStore, useEffect, useState } from "react";
+import React, { useSyncExternalStore, useEffect, useState, useMemo } from "react";
 import {
   subscribe, getSnapshot,
   newTab, activateTab, closeTab, restartTab, fitActive, refitNodes,
@@ -8,15 +8,19 @@ import TabStage from "./components/TabStage.jsx";
 import InputBar from "./components/InputBar.jsx";
 import PipelineDashboard from "./components/PipelineDashboard.jsx";
 import WorkspaceTabBar from "./components/WorkspaceTabBar.jsx";
+import SharedNodeView from "./components/SharedNodeView.jsx";
 
 export default function App() {
   const { status, tabs, activeTabId, workspaces, activeWorkspaceId } = useSyncExternalStore(subscribe, getSnapshot);
-  const [view, setView] = useState("terminal"); // "terminal" | "pipeline"
-
-  // Open the first interactive tab once the WebSocket is open.
-  useEffect(() => {
-    if (status === "open" && tabs.filter(t => !t.isNode).length === 0) newTab();
-  }, [status, tabs]);
+  // A shared deep-link (/shared/workspace/{wid}/t/{nodeId}) just selects the
+  // Share view with this target; no separate page.
+  const shareTarget = useMemo(() => {
+    const m = location.pathname.match(/^\/shared\/workspace\/([^/]+)\/t\/(.+)$/);
+    return m ? { workspaceId: m[1], nodeId: m[2] } : null;
+  }, []);
+  const [view, setView] = useState(shareTarget ? "share" : "terminal"); // terminal | pipeline | share
+  // Interactive terminals are now server-driven + shared: the controller syncs
+  // them on connect and auto-creates the first one if none exist.
 
   // Refit active terminal on window resize.
   useEffect(() => {
@@ -50,6 +54,12 @@ export default function App() {
             onClick={() => setView("pipeline")}
           >
             Pipeline
+          </button>
+          <button
+            className={`toggle-btn ${view === "share" ? "active" : ""}`}
+            onClick={() => setView("share")}
+          >
+            Share
           </button>
         </div>
 
@@ -98,6 +108,18 @@ export default function App() {
               ))
             )}
           </div>
+        </div>
+
+        <div
+          className="share-view-wrap"
+          style={{ display: view === "share" ? "flex" : "none" }}
+        >
+          {shareTarget
+            ? <SharedNodeView workspaceId={shareTarget.workspaceId} nodeId={shareTarget.nodeId} />
+            : <div className="share-empty">
+                <div className="share-empty-title">Share a terminal to view</div>
+                <div className="share-empty-sub">Open a node's 🔗 link from the Pipeline view to focus a single live terminal here.</div>
+              </div>}
         </div>
 
         <div

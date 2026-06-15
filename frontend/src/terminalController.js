@@ -11,6 +11,13 @@ import { b64dec, strToB64 } from "./wire.js";
 
 const WS_URL = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 
+// Fixed grid for shared node terminals — must match the node session size the
+// backend creates (PipelineEngine/TerminalNode: 80x24). Node terminals render
+// at this size and never resize the PTY, so multiple simultaneous viewers (card,
+// Share view, other windows) can't fight over the width and scramble a TUI.
+const NODE_COLS = 80;
+const NODE_ROWS = 24;
+
 // ── state shape ─────────────────────────────────────────────────────────────
 let _state = {
   status: "connecting", // "connecting" | "open" | "closed"
@@ -24,6 +31,7 @@ let _state = {
 };
 
 let _tabCounter = 0;
+let _autoTerm = false;  // have we auto-created the first interactive terminal?
 
 // Node-card tab id, namespaced per workspace so the same node id (n0, n1/0, …)
 // in two concurrent workspaces never collides in the tabs list or _terms map.
@@ -100,11 +108,14 @@ function _connect() {
 
   _ws.onopen = () => {
     _setState({ status: "open" });
-    // Fetch the persisted workspace list (definitions) for the pipeline view.
-    _send({ type: "list_workspaces" });
-    // Reopen any interactive tabs that were waiting (e.g. after reconnect)
-    for (const t of _state.tabs) {
-      if (t.status === "starting" && !t.isNode) _sendStart(t.id);
+    // One sync hands this window the SHARED terminal + workspace lists and
+    // replays any running pipelines, so it mirrors the other windows.
+    _send({ type: "sync" });
+    // Reconnect: re-subscribe any already-mounted terminals (reset first so the
+    // replay doesn't duplicate what's already on screen).
+    for (const tabId of _terms.keys()) {
+      const tab = _state.tabs.find((t) => t.id === tabId && !t.isNode);
+      if (tab?.sessionId) { _terms.get(tabId).main.reset(); _send({ type: "attach", id: tab.sessionId }); }
     }
   };
 
@@ -171,6 +182,34 @@ function _handleMsg(msg) {
       if (tabId) _patchTab(tabId, { status: "exited" });
       break;
     }
+    case "terminal_list": {
+      // The shared set of interactive terminals (mirrored across windows).
+      // Interactive tab id === its session id; node tabs are kept as-is.
+      const serverTerms = msg.terminals || [];
+      const serverIds = new Set(serverTerms.map((t) => t.id));
+      const prevIds = new Set(_state.tabs.filter((t) => !t.isNode).map((t) => t.id));
+      // Drop routing for terminals that went away (their TabStage unmounts).
+      for (const t of _state.tabs) {
+        if (!t.isNode && !serverIds.has(t.id)) _bySession.delete(t.id);
+      }
+      const interactive = serverTerms.map((t) => ({
+        id: t.id, title: t.title, sessionId: t.id, status: "running", isNode: false,
+      }));
+      const nodeTabs = _state.tabs.filter((t) => t.isNode);
+      // Auto-select a newly-appeared terminal; else keep the current active if
+      // still present, else fall back to the last terminal.
+      const newId = serverTerms.find((t) => !prevIds.has(t.id))?.id;
+      let active = newId || _state.activeTabId;
+      const allIds = new Set([...serverIds, ...nodeTabs.map((t) => t.id)]);
+      if (!allIds.has(active)) active = interactive[interactive.length - 1]?.id ?? null;
+      _setState({ tabs: [...interactive, ...nodeTabs], activeTabId: active });
+      // First window with no terminals: open one (broadcasts to all windows).
+      if (serverTerms.length === 0 && !_autoTerm) {
+        _autoTerm = true;
+        _send({ type: "create_terminal", cols: 80, rows: 24 });
+      }
+      break;
+    }
     case "workspace_list": {
       // The server's source of truth for which workspaces exist. Merge in
       // definitions, preserving each existing workspace's live run state and
@@ -192,7 +231,9 @@ function _handleMsg(msg) {
       if (!wid) break;
       // Re-runs reuse node ids, so clear the previous run's node cards first.
       _clearWorkspaceNodeTabs(wid);
-      _patchWorkspace(wid, (w) => ({ ..._blankRunState(), spec: w.spec, status: "running" }));
+      // Use the broadcast spec so EVERY window (and a synced one) can render the
+      // live tree, not just the window that clicked Run. Fall back to local spec.
+      _patchWorkspace(wid, (w) => ({ ..._blankRunState(), spec: msg.spec || w.spec, status: "running" }));
       break;
     }
     case "pipeline_finished": {
@@ -286,24 +327,11 @@ function _handleMsg(msg) {
 }
 
 // ── tab lifecycle ────────────────────────────────────────────────────────────
-function _sendStart(tabId) {
-  const rec = _terms.get(tabId);
-  const cols = rec ? rec.main.cols : 80;
-  const rows = rec ? rec.main.rows : 24;
-  // Record the dims we started at so fitTab won't send a redundant resize
-  // (which would SIGWINCH the shell into reprinting its prompt).
-  if (rec) { rec._lastCols = cols; rec._lastRows = rows; }
-  // cid lets the server echo back which tab this session belongs to.
-  _send({ type: "start", shell: "bash", cols, rows, cid: tabId });
-}
 
 export function newTab() {
-  const id = `tab-${++_tabCounter}`;
-  const title = `bash #${_tabCounter}`;
-  const tab = { id, title, sessionId: null, status: "starting" };
-  _setState({ tabs: [..._state.tabs, tab], activeTabId: id });
-  // If WS already open, start will be sent from mountTab once terminals exist.
-  return id;
+  // Server-driven + shared: create_terminal broadcasts terminal_list, so the
+  // new tab appears (and attaches) in EVERY window; auto-selected here on arrival.
+  _send({ type: "create_terminal", cols: 80, rows: 24 });
 }
 
 /** Called by TabStage once its host divs are in the DOM. */
@@ -343,17 +371,12 @@ export function mountTab(tabId, mainHost, mirrorHost) {
     }
   });
 
-  // Register the session BEFORE fitting: a fit() failure on a freshly
-  // shown host must never prevent the session from starting.
   _terms.set(tabId, { main, mirror, mainFit, mirrorFit });
-
-  // Fit BEFORE starting so the PTY is created at its final size. Otherwise the
-  // shell prints a prompt at 80x24, then the post-start resize fires SIGWINCH
-  // and it reprints — the doubled prompt. (fitTab won't send a resize here:
-  // the tab isn't "running" yet.) Re-fit after paint to correct any pre-layout
-  // miscalc; the resize guard makes that a no-op if the size is unchanged.
+  // Interactive tab id === its (server-created) session id. Attach to it —
+  // terminals are shared/server-owned now, so we mirror rather than spawn.
+  _bySession.set(tabId, tabId);
   fitTab(tabId);
-  if (_ws?.readyState === WebSocket.OPEN) _sendStart(tabId);
+  if (_ws?.readyState === WebSocket.OPEN) _send({ type: "attach", id: tabId });
   requestAnimationFrame(() => fitTab(tabId));
 }
 
@@ -375,7 +398,7 @@ export function unmountTab(tabId) {
  * sending a "start".
  */
 export function mountNodeTerm(tabId, host, agentNodeId = null) {
-  if (_terms.has(tabId)) { fitTab(tabId); return; } // already mounted
+  if (_terms.has(tabId)) return; // already mounted; fixed grid needs no refit
   const tab = _state.tabs.find((t) => t.id === tabId);
   if (!tab) return;
 
@@ -391,9 +414,15 @@ export function mountNodeTerm(tabId, host, agentNodeId = null) {
     fontFamily: mono,
     fontSize: 12, cursorBlink: true,
   });
-  const mainFit = new FitAddon();
-  main.loadAddon(mainFit);
   main.open(host);
+  // Pinned grid (see NODE_COLS): a node session is shared by several viewers at
+  // once (its card, the focused Share view, other windows). If each fit its own
+  // width and resized the one shared PTY, they'd fight over its size and an
+  // interactive TUI's cursor-addressed output would land at the wrong columns
+  // (the scrambled text). So render at the session's fixed size and never resize
+  // the PTY — every viewer sees the same grid. A narrower card clips it; the
+  // larger Share view shows it with margin.
+  try { main.resize(NODE_COLS, NODE_ROWS); } catch (_) { /* not laid out yet */ }
 
   let _line = "";
   main.onData((data) => {
@@ -421,17 +450,11 @@ export function mountNodeTerm(tabId, host, agentNodeId = null) {
     if (t?.sessionId) _send({ type: "stdin", id: t.sessionId, data: strToB64(data) });
   });
 
-  // Refit (and resize the PTY) whenever the card's width changes — wrapping,
-  // window resize, or layout settling — so the xterm fits its column.
-  const ro = new ResizeObserver(() => fitTab(tabId));
-  ro.observe(host);
-
   // Register before attaching so replay/stdout has a terminal to write to.
-  _terms.set(tabId, { main, mirror: null, mainFit, mirrorFit: null, ro });
+  // No FitAddon/ResizeObserver: the grid is fixed and the PTY is never resized.
+  _terms.set(tabId, { main, mirror: null, mainFit: null, mirrorFit: null, ro: null });
 
   if (tab.sessionId) _send({ type: "attach", id: tab.sessionId });
-  fitTab(tabId);
-  requestAnimationFrame(() => fitTab(tabId));
 }
 
 
@@ -543,31 +566,15 @@ export function activateTab(tabId) {
 }
 
 export function closeTab(tabId) {
+  // Shared: close_terminal kills the session and broadcasts the new list, so the
+  // tab disappears from every window (state updated when terminal_list arrives).
   const tab = _state.tabs.find((t) => t.id === tabId);
-  if (tab?.sessionId) _send({ type: "close", id: tab.sessionId });
-  if (tab?.sessionId) _bySession.delete(tab.sessionId);
-
-  const remaining = _state.tabs.filter((t) => t.id !== tabId);
-  const nextActive =
-    _state.activeTabId === tabId
-      ? remaining[remaining.length - 1]?.id ?? null
-      : _state.activeTabId;
-  _setState({ tabs: remaining, activeTabId: nextActive });
-  // unmountTab called by the TabStage cleanup effect
+  if (tab?.sessionId) _send({ type: "close_terminal", id: tab.sessionId });
 }
 
 export function restartTab(tabId) {
   const tab = _state.tabs.find((t) => t.id === tabId);
-  if (!tab) return;
-  if (tab.sessionId) {
-    _send({ type: "close", id: tab.sessionId });
-    _bySession.delete(tab.sessionId);
-  }
-  // Clear terminal buffers
-  const rec = _terms.get(tabId);
-  if (rec) { rec.main.reset(); rec.mirror.reset(); }
-  _patchTab(tabId, { sessionId: null, status: "starting" });
-  if (_ws?.readyState === WebSocket.OPEN) _sendStart(tabId);
+  if (tab?.sessionId) _send({ type: "restart_terminal", id: tab.sessionId });
 }
 
 export function sendStdin(data) {

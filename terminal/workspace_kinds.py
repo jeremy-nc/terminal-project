@@ -134,31 +134,52 @@ class WorktreeKind(WorkspaceKind):
         if os.path.exists(path):
             raise WorkspaceError(f"worktree path already exists: {path}")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        # Choose the worktree's branch source:
-        #   local branch exists        -> check it out (the "open my ticket branch" case)
-        #   else origin has the branch -> fetch it + create a tracking branch
-        #                                 (the dependabot / PR-branch case — the real
-        #                                  commits live on origin, so we must fetch;
-        #                                  fetch is non-destructive, never a merge)
-        #   else                       -> create a new branch off the repo's default
-        #                                 branch (origin/<default>), fetched fresh
+        # Choose the worktree's branch source. origin is AUTHORITATIVE for branches
+        # that exist there: dependabot/PR branches live on origin and are frequently
+        # force-pushed (rebased), so a stale LOCAL branch of the same name — a cache
+        # left by an earlier worktree, or pinned to an old pre-rebase commit — must
+        # NOT be preferred. Preferring it is exactly how unrelated commits "ride
+        # along". So:
+        #   origin has it & local is just a cache -> realign local to origin/<branch>
+        #   local has genuine unpushed work        -> open it as-is ("my ticket branch")
+        #   origin has it, no local                -> fetch + tracking branch
+        #   neither                                -> new branch off origin/<default>
         base_ref = None
-        if _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
-            source = "local"
-            add = _git(repo, "worktree", "add", path, branch)
-        elif self._origin_has_branch(repo, branch):
-            source = "remote"
+        local_exists = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0
+        origin_has = self._origin_has_branch(repo, branch)
+        if origin_has:
+            # Refresh origin's copy of the branch (non-destructive: download only,
+            # never a merge), plus the default branch so the "is the local branch
+            # just a cache of origin?" check below sees recently-merged commits
+            # (e.g. on main) as already pushed rather than as ride-along work.
             fetch = _git(repo, "fetch", "origin", f"+{branch}:refs/remotes/origin/{branch}")
             if fetch.returncode != 0:
                 raise WorkspaceError(f"git fetch origin {branch} failed: {(fetch.stderr or fetch.stdout).strip()}")
+            dflt = self._default_branch(repo)
+            if dflt:
+                _git(repo, "fetch", "origin", dflt)
+
+        if origin_has and local_exists and not self._has_unpushed(repo, branch):
+            # The local branch carries nothing origin doesn't already have — it's a
+            # stale cache. Realign it to origin so the worktree is exactly
+            # origin/<branch> (just the bump), not an old base's commits.
+            source = "remote"
+            _git(repo, "branch", "-f", branch, f"origin/{branch}")
+            add = _git(repo, "worktree", "add", path, branch)
+        elif local_exists:
+            # A local branch with your own unpushed work (or no origin copy at all) —
+            # open it untouched.
+            source = "local"
+            add = _git(repo, "worktree", "add", path, branch)
+        elif origin_has:
+            source = "remote"
             add = _git(repo, "worktree", "add", "--track", "-b", branch, path, f"origin/{branch}")
         else:
             source = "new"
             # Base a genuinely-new branch on the repo's DEFAULT branch (origin/HEAD,
             # usually main), FETCHED FRESH — not the main checkout's current HEAD,
             # which may be parked on another branch and would leak its commits into
-            # the new one. Fetch is non-destructive (download only, never a merge).
-            # Fall back to local HEAD if the remote default can't be resolved.
+            # the new one. Fall back to local HEAD if the remote default can't resolve.
             base = self._default_branch(repo)
             if base:
                 _git(repo, "fetch", "origin", base)
@@ -179,6 +200,14 @@ class WorktreeKind(WorkspaceKind):
     def _origin_has_branch(self, repo: str, branch: str) -> bool:
         r = _git(repo, "ls-remote", "--heads", "origin", branch)
         return r.returncode == 0 and bool(r.stdout.strip())
+
+    def _has_unpushed(self, repo: str, branch: str) -> bool:
+        """True if the local branch has commit(s) not reachable from any origin
+        remote-tracking ref — i.e. genuine local work we must not discard. False
+        means the branch is purely a cache of origin and is safe to realign. On any
+        git error we conservatively return True (keep the local branch)."""
+        r = _git(repo, "rev-list", "--count", branch, "--not", "--remotes=origin")
+        return not (r.returncode == 0 and r.stdout.strip() == "0")
 
     def _default_branch(self, repo: str):
         """The remote's default branch name (e.g. 'main'), or None. Reads the local

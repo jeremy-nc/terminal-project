@@ -15,11 +15,11 @@ export default function CloseWorkspaceModal({ workspace, blockedMessage, onClose
   const isWorktree = workspace.kind === "worktree";
   const branch = workspace.meta?.branch || workspace.name;
 
-  // Keep / plain delete resolve immediately; Remove waits (it may come back
-  // blocked, re-rendering this dialog with a Force option, or remove the
-  // workspace — at which point the parent unmounts us).
+  // Every choice dismisses the dialog immediately; the tab then shows "closing…"
+  // while the backend tears down. A blocked Remove re-opens this dialog (via the
+  // parent) with a Force option.
   const keep = () => { deleteWorkspace(workspace.id); onClose(); };
-  const remove = () => deleteWorkspace(workspace.id, { remove_resources: true });
+  const remove = () => { deleteWorkspace(workspace.id, { remove_resources: true }); onClose(); };
   const force = () => { deleteWorkspace(workspace.id, { remove_resources: true, force: true }); onClose(); };
 
   return (

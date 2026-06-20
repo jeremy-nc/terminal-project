@@ -31,6 +31,9 @@ class Workspace:
         self.kind = kind or "directory"
         self.meta = meta or {}
         self.run = None         # current PipelineRun (in-memory context); set on execute
+        # Transient: True while a close is tearing down (run stopping + resource
+        # cleanup). Broadcast so the tab shows "closing…"; never persisted.
+        self.closing = False
 
     def to_json(self) -> dict:
         """The persisted definition subset (run context is transient)."""

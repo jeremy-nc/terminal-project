@@ -15,6 +15,10 @@ export default function WorkspaceTabBar({ workspaces, activeWorkspaceId, kinds, 
   useEffect(() => {
     if (closingId && !closing) setClosingId(null);
   }, [closingId, closing]);
+  // A blocked removal (dirty worktree) re-opens the dialog so the user can Force.
+  useEffect(() => {
+    if (closeBlocked) setClosingId(closeBlocked.workspaceId);
+  }, [closeBlocked]);
 
   const startClose = (wid) => { clearCloseBlocked(); setClosingId(wid); };
   const endClose = () => { clearCloseBlocked(); setClosingId(null); };
@@ -24,18 +28,22 @@ export default function WorkspaceTabBar({ workspaces, activeWorkspaceId, kinds, 
       {workspaces.map((w) => (
         <div
           key={w.id}
-          className={`ws-tab${w.id === activeWorkspaceId ? " active" : ""}`}
+          className={`ws-tab${w.id === activeWorkspaceId ? " active" : ""}${w.closing ? " closing" : ""}`}
           onClick={() => selectWorkspace(w.id)}
           title={w.kind === "worktree" ? `worktree · ${w.meta?.branch || w.name}\n${w.dir}` : w.dir}
         >
-          <span className={`ws-dot status-${w.status || "idle"}`}></span>
+          {w.closing
+            ? <span className="ws-spinner" title="closing…"></span>
+            : <span className={`ws-dot status-${w.status || "idle"}`}></span>}
           {w.kind === "worktree" && <span className="ws-kind-badge" title="git worktree">⌥</span>}
           <span className="ws-tab-title">{w.name}</span>
-          <button
-            className="ws-close"
-            onClick={(e) => { e.stopPropagation(); startClose(w.id); }}
-            title="Close workspace"
-          >×</button>
+          {w.closing
+            ? <span className="ws-closing-label">closing…</span>
+            : <button
+                className="ws-close"
+                onClick={(e) => { e.stopPropagation(); startClose(w.id); }}
+                title="Close workspace"
+              >×</button>}
         </div>
       ))}
       <button className="ws-new" onClick={() => openNewWorkspace()} title="New workspace">+</button>

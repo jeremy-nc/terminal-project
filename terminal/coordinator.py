@@ -1038,7 +1038,9 @@ class PipelineEngine:
             })
             return result
         except asyncio.CancelledError:
-            self.sub.send({"type": "pipeline_error", "message": "Pipeline cancelled"})
+            # User cancelled (or the workspace is closing) — a deliberate stop, not
+            # an error. Report it as a distinct, neutral state.
+            self.sub.send({"type": "pipeline_cancelled", "message": "Pipeline cancelled"})
             raise
         except Exception as e:
             self.sub.send({"type": "pipeline_error", "message": str(e)})

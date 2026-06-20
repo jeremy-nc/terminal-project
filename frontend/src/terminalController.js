@@ -267,8 +267,8 @@ function _handleMsg(msg) {
       }
       const merged = defs.map((d) =>
         existing.has(d.id)
-          ? { ...existing.get(d.id), name: d.name, dir: d.dir, kind: d.kind, meta: d.meta }
-          : { id: d.id, name: d.name, dir: d.dir, dsl: d.dsl || "", kind: d.kind || "directory", meta: d.meta || {}, ..._blankRunState() }
+          ? { ...existing.get(d.id), name: d.name, dir: d.dir, kind: d.kind, meta: d.meta, closing: d.closing }
+          : { id: d.id, name: d.name, dir: d.dir, dsl: d.dsl || "", kind: d.kind || "directory", meta: d.meta || {}, closing: d.closing, ..._blankRunState() }
       );
       let active = msg.created || _state.activeWorkspaceId;
       if (!merged.find((w) => w.id === active)) active = merged[0]?.id ?? null;
@@ -315,6 +315,11 @@ function _handleMsg(msg) {
     }
     case "pipeline_error": {
       _patchWorkspace(msg.workspace_id, { status: "error", error: msg.message });
+      break;
+    }
+    case "pipeline_cancelled": {
+      // Deliberate stop (Cancel / closing) — neutral, not an error banner.
+      _patchWorkspace(msg.workspace_id, { status: "cancelled", error: null });
       break;
     }
     case "node_warning": {
@@ -819,6 +824,33 @@ export function refitNodes() {
  *  world's in-room screens. Uses the live xterm we already keep mounted (fed by
  *  the existing stdout stream), so it's fully decoupled: no backend call, no extra
  *  state. Returns null if that terminal isn't mounted yet. */
+// Standard ANSI 16-colour palette (xterm-ish), then the 6×6×6 cube and greys.
+const ANSI16 = [
+  "#000000", "#cd3131", "#0dbc79", "#e5e510", "#2472c8", "#bc3fbc", "#11a8cd", "#e5e5e5",
+  "#666666", "#f14c4c", "#23d18b", "#f5f543", "#3b8eea", "#d670d6", "#29b8db", "#ffffff",
+];
+function ansi256(i) {
+  if (i < 16) return ANSI16[i];
+  if (i < 232) {
+    const n = i - 16, q = (x) => (x ? x * 40 + 55 : 0);
+    return `rgb(${q(Math.floor(n / 36))},${q(Math.floor((n % 36) / 6))},${q(n % 6)})`;
+  }
+  const l = (i - 232) * 10 + 8;
+  return `rgb(${l},${l},${l})`;
+}
+const rgbHex = (v) => `#${(v & 0xffffff).toString(16).padStart(6, "0")}`;
+function cellColor(cell, bg) {
+  if (bg) {
+    if (cell.isBgDefault()) return null;
+    return cell.isBgRGB() ? rgbHex(cell.getBgColor()) : ansi256(cell.getBgColor());
+  }
+  if (cell.isFgDefault()) return null;
+  return cell.isFgRGB() ? rgbHex(cell.getFgColor()) : ansi256(cell.getFgColor());
+}
+
+/** Read a node terminal's visible grid as styled runs for the 3D screen mirror.
+ *  Each row is an array of {t, fg, bg, bold} spans (fg/bg = CSS colour or null
+ *  for the terminal default). Colour comes straight from xterm's cell buffer. */
 export function readNodeScreen(tabId) {
   const term = _terms.get(tabId)?.main;
   if (!term) return null;
@@ -826,9 +858,34 @@ export function readNodeScreen(tabId) {
   const rows = [];
   for (let y = 0; y < term.rows; y++) {
     const line = buf.getLine(buf.baseY + y);
-    rows.push(line ? line.translateToString(true) : "");
+    const spans = [];
+    if (line) {
+      let cur = null;
+      for (let x = 0; x < term.cols; x++) {
+        const c = line.getCell(x);
+        if (!c || c.getWidth() === 0) continue;   // skip placeholder after a wide char
+        const inv = c.isInverse();
+        const fg0 = cellColor(c, false), bg0 = cellColor(c, true);
+        const fg = inv ? (bg0 || "#07140d") : fg0;
+        const bg = inv ? (fg0 || "#cdd6d0") : bg0;
+        const bold = c.isBold() ? 1 : 0;
+        const t = c.getChars() || " ";
+        if (cur && cur.fg === fg && cur.bg === bg && cur.bold === bold) cur.t += t;
+        else { cur = { t, fg, bg, bold }; spans.push(cur); }
+      }
+    }
+    rows.push(spans);
   }
-  return { rows, cols: term.cols };
+  return { rows, cols: term.cols, cursorX: buf.cursorX, cursorY: buf.cursorY };
+}
+
+/** Route raw bytes to a node terminal's PTY — the same path the live xterm's
+ *  onData uses. Powers WorldView's in-world typing. Returns true if delivered. */
+export function sendTerminalInput(tabId, data) {
+  const tab = _state.tabs.find((t) => t.id === tabId);
+  if (!tab?.sessionId) return false;
+  _send({ type: "stdin", id: tab.sessionId, data: strToB64(data) });
+  return true;
 }
 
 // ── useSyncExternalStore API ─────────────────────────────────────────────────

@@ -151,7 +151,9 @@ def _repos_event() -> dict:
 def _workspace_list_event(created: str = None) -> dict:
     return {
         "type": "workspace_list",
-        "workspaces": [w.to_json() for w in workspaces.list()],
+        # The transient `closing` flag rides alongside the persisted definition.
+        "workspaces": [{**w.to_json(), "closing": getattr(w, "closing", False)}
+                       for w in workspaces.list()],
         "created": created,
         # Kind manifest so the create modal can render kind-agnostically.
         "kinds": kinds_manifest(),
@@ -473,12 +475,15 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
     if mtype == "delete_workspace":
         wid = msg.get("workspace_id")
         ws = workspaces.get(wid)
-        if ws is None:
+        if ws is None or ws.closing:   # ignore a re-close while one is already in flight
             return
         remove = bool(msg.get("remove_resources"))
         force = bool(msg.get("force"))
 
         async def _close():
+            # Mark closing + broadcast so every window shows the tab tearing down.
+            ws.closing = True
+            hub.send(_workspace_list_event())
             # Stop any in-flight run and WAIT for its teardown (child PTYs killed,
             # processes exited) BEFORE touching the worktree — otherwise cleanup
             # would run under a live process and race the kill.
@@ -497,8 +502,11 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
                 warnings = await asyncio.get_running_loop().run_in_executor(
                     None, lambda: get_kind(ws.kind).cleanup(ws.meta, force=force))
                 if warnings and not force:
+                    ws.closing = False   # un-close: back to a normal workspace
+                    hub.send(_workspace_list_event())
                     sub.send({"type": "workspace_cleanup_blocked", "workspace_id": wid, "message": warnings[0]})
                     return
+            # Session stopped + resources cleaned -> drop the record; tab vanishes.
             workspaces.delete(wid)
             hub.send(_workspace_list_event())
 

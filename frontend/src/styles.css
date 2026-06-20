@@ -802,6 +802,73 @@ html, body { background: var(--bg); }
   min-width: 0;
 }
 
+/* ── itr loop container ─────────────────────────────────────────────────── */
+.node-container.iteration { border-color: #3a3354; }
+.node-container.iteration > .node-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.node-container.iteration.live.status-finished { border-color: var(--success); }
+
+/* "Iterating" border: a bright segment sweeps around the perimeter while the
+   loop is running. A rotating conic-gradient ring masked to just the border. */
+@property --itr-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+.node-container.iteration.live.status-running {
+  border-color: transparent;
+  position: relative;
+}
+.node-container.iteration.live.status-running::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 2px;                 /* ring thickness = border width */
+  background: conic-gradient(from var(--itr-angle),
+      rgba(124, 108, 255, 0.10) 0deg,
+      rgba(124, 108, 255, 0.10) 210deg,
+      var(--accent) 290deg,
+      #cbb6ff 320deg,
+      rgba(124, 108, 255, 0.10) 360deg);
+  /* show only the border ring: fill minus the content box */
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+          mask-composite: exclude;
+  animation: itr-spin 1.5s linear infinite;
+  pointer-events: none;
+}
+@keyframes itr-spin { to { --itr-angle: 360deg; } }
+@media (prefers-reduced-motion: reduce) {
+  .node-container.iteration.live.status-running::after { animation: none; }
+}
+.iter-badge {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(124, 108, 255, 0.18);
+  color: var(--accent-hover, #9b8cff);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.node-container.iteration.status-finished .iter-badge {
+  background: rgba(34, 197, 94, 0.16);
+  color: var(--success, #22c55e);
+}
+.iter-until {
+  font-size: 11px;
+  color: #888;
+  font-style: italic;
+  margin-left: auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 45%;
+}
+
 /* Pulse animation for waiting nodes */
 @keyframes pulse-border {
   0%, 100% { border-color: var(--warn); box-shadow: 0 0 0 0 rgba(234,179,8,0); }

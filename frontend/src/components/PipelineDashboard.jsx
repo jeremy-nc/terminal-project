@@ -108,6 +108,19 @@ export default function PipelineDashboard({ workspace, tabs }) {
       );
     }
 
+    if (node.type === "iteration") {
+      return (
+        <div key={node.id || Math.random()} className="node-container batch iteration">
+          <div className="node-label">
+            Loop ×{node.max_iterations} max{node.until ? ` · until: ${node.until}` : " · self-assessed"}
+          </div>
+          <div className="node-children">
+            {(node.body?.nodes || []).map(n => renderNode(n))}
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div key={node.id || Math.random()} className="node-container terminal">
         <div className="terminal-status-dot pending"></div>
@@ -222,6 +235,28 @@ export default function PipelineDashboard({ workspace, tabs }) {
                 </div>
               );
             })}
+          </div>
+        </div>
+      );
+    }
+
+    if (node.type === "iteration") {
+      const iter = active.iterById?.[node.id];
+      const max = iter?.max ?? node.max_iterations ?? 5;
+      const cur = iter?.current || 0;
+      const istatus = active.statusById?.[node.id];
+      const badge = istatus === "finished"
+        ? `done · ${cur}/${max} pass${cur === 1 ? "" : "es"}`
+        : cur > 0 ? `pass ${cur}/${max}` : `up to ${max} passes`;
+      return (
+        <div key={node.id} id={`pl-node-${node.id}`} className={`node-container batch live iteration status-${istatus || "pending"}`}>
+          <div className="node-label">
+            <span className="iter-title">Loop</span>
+            <span className="iter-badge">{badge}</span>
+            {node.until && <span className="iter-until" title={`completes when: ${node.until}`}>until: {node.until}</span>}
+          </div>
+          <div className="iteration-body">
+            {renderLiveNodeTree(node.body)}
           </div>
         </div>
       );

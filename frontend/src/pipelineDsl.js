@@ -62,49 +62,33 @@ export function parseDsl(text) {
       continue;
     }
 
-    // dyn_batch: cmd            -> fan out one terminal per item, list derived
-    //                              at runtime (LLM-structured if not already a list)
-    // dyn_batch(N): cmd         -> N identical terminals (best-of-N), no LLM
-    if (line.startsWith("dyn_batch")) {
-      const match = line.match(/^dyn_batch(?:\((\d+)\))?:\s*(.*)$/);
-      if (match) {
-        const count = match[1] ? parseInt(match[1]) : null;
-        const { argv, cwd } = _parseCommand(match[2]);
-        const node = count != null
-          ? { id: nextId(), type: "fanout", argv, count }
-          : { id: nextId(), type: "dynamic_batch", argv };
-        if (cwd !== null) node.cwd = cwd;
+    // itr(N): <indented block>  -> IterationNode. Loops the body (seq/batch/…
+    //   lines) feeding each pass's output back as the next pass's input, until a
+    //   hidden judge says complete or N passes run (default 5). An `until:` line
+    //   gives the judge a plain-language criterion; omit it to let it self-assess.
+    if (line.startsWith("itr:") || line.startsWith("itr(")) {
+      const m = line.match(/^itr(?:\((\d+)\))?:\s*(.*)$/);
+      if (m) {
+        const maxIter = m[1] ? parseInt(m[1]) : 5;
+        const itrId = nextId();
+        const bodyId = nextId();
+        const { bodyNodes, until, next } = _parseItrBlock(rawLines, i, nextId);
+        i = next;
+        const node = {
+          id: itrId,
+          type: "iteration",
+          max_iterations: maxIter,
+          body: { id: bodyId, type: "sequence", nodes: bodyNodes },
+        };
+        if (until != null) node.until = until;
         nodes.push(node);
       }
       continue;
     }
 
-    if (line.startsWith("batch:") || line.startsWith("batch(")) {
-      // batch(N): cmd1, cmd2...
-      const match = line.match(/^batch(?:\((\d+)\))?:\s*(.*)$/);
-      if (match) {
-        const concurrency = match[1] ? parseInt(match[1]) : null;
-        const cmds = _splitCommands(match[2]);
-        nodes.push({
-          id: nextId(),
-          type: "batch",
-          concurrency,
-          nodes: cmds.map(c => {
-            const { argv, cwd } = _parseCommand(c);
-            const node = { id: nextId(), type: "terminal", argv };
-            if (cwd !== null) node.cwd = cwd;
-            return node;
-          })
-        });
-      }
-    } else {
-      // seq: cmd OR just cmd
-      const cmdText = line.startsWith("seq:") ? line.slice(4).trim() : line;
-      const { argv, cwd } = _parseCommand(cmdText);
-      const node = { id: nextId(), type: "terminal", argv };
-      if (cwd !== null) node.cwd = cwd;
-      nodes.push(node);
-    }
+    // dyn_batch / batch / seq / bare command -> a single node
+    const node = _parseNodeLine(line, nextId);
+    if (node) nodes.push(node);
   }
 
   const root = { id: "root", type: "sequence", nodes };
@@ -178,7 +162,80 @@ function _parseAgentBlock(rawLines, i) {
   return { block, next: i };
 }
 
-/** 
+/**
+ * Parse a single non-block line into one node: `dyn_batch(N): …`, `batch(N): …`,
+ * `seq: …`, or a bare command. Shared by the top-level loop and the itr body so
+ * the same forms work inside `itr:`.
+ */
+function _parseNodeLine(line, nextId) {
+  if (line.startsWith("dyn_batch")) {
+    const match = line.match(/^dyn_batch(?:\((\d+)\))?:\s*(.*)$/);
+    if (!match) return null;
+    const count = match[1] ? parseInt(match[1]) : null;
+    const { argv, cwd } = _parseCommand(match[2]);
+    const node = count != null
+      ? { id: nextId(), type: "fanout", argv, count }
+      : { id: nextId(), type: "dynamic_batch", argv };
+    if (cwd !== null) node.cwd = cwd;
+    return node;
+  }
+  if (line.startsWith("batch:") || line.startsWith("batch(")) {
+    const match = line.match(/^batch(?:\((\d+)\))?:\s*(.*)$/);
+    if (!match) return null;
+    const concurrency = match[1] ? parseInt(match[1]) : null;
+    const cmds = _splitCommands(match[2]);
+    return {
+      id: nextId(),
+      type: "batch",
+      concurrency,
+      nodes: cmds.map(c => {
+        const { argv, cwd } = _parseCommand(c);
+        const n = { id: nextId(), type: "terminal", argv };
+        if (cwd !== null) n.cwd = cwd;
+        return n;
+      }),
+    };
+  }
+  // seq: cmd OR just cmd
+  const cmdText = line.startsWith("seq:") ? line.slice(4).trim() : line;
+  const { argv, cwd } = _parseCommand(cmdText);
+  const node = { id: nextId(), type: "terminal", argv };
+  if (cwd !== null) node.cwd = cwd;
+  return node;
+}
+
+/**
+ * Indented `itr:` block: collects body node lines (seq/batch/…) in order, plus an
+ * optional `until: <criterion>` line (the hidden judge's condition; surrounding
+ * quotes stripped). Returns the body nodes, the criterion, and where the block ended.
+ */
+function _parseItrBlock(rawLines, i, nextId) {
+  const bodyNodes = [];
+  let until = null;
+  while (i < rawLines.length) {
+    const raw = rawLines[i];
+    if (!raw.trim()) { i++; continue; }            // blank line inside the block
+    const indent = raw.length - raw.trimStart().length;
+    if (indent === 0) break;                        // dedent -> block ends
+    const line = raw.trim();
+    i++;
+    if (line.startsWith("#")) continue;
+    if (line.startsWith("until:")) {
+      let v = line.slice(6).trim();
+      if (v.length >= 2 && ((v[0] === '"' && v[v.length - 1] === '"') ||
+                            (v[0] === "'" && v[v.length - 1] === "'"))) {
+        v = v.slice(1, -1);
+      }
+      until = v || null;
+      continue;
+    }
+    const node = _parseNodeLine(line, nextId);
+    if (node) bodyNodes.push(node);
+  }
+  return { bodyNodes, until, next: i };
+}
+
+/**
  * Splits comma-separated commands, respecting quoted strings.
  * e.g. 'echo "a, b", ls' -> ['echo "a, b"', 'ls']
  */

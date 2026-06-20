@@ -41,6 +41,8 @@ function _blankRunState() {
   return {
     status: "idle", spec: null, statusById: {}, sessionById: {},
     childrenByParent: {}, outputs: {}, result: null,
+    // itr loop badge state: node_id -> { current, max, complete }
+    iterById: {},
     warnings: [], error: null, currentStage: null,
   };
 }
@@ -142,6 +144,7 @@ function _subtreeHasNode(node, nodeId) {
   if (!node) return false;
   if (node.id === nodeId) return true;
   if (typeof nodeId === "string" && typeof node.id === "string" && nodeId.startsWith(node.id + "/")) return true;
+  if (node.body && _subtreeHasNode(node.body, nodeId)) return true; // itr loop body
   return Array.isArray(node.nodes) && node.nodes.some((c) => _subtreeHasNode(c, nodeId));
 }
 
@@ -254,27 +257,44 @@ function _handleMsg(msg) {
       // are drawn from the spec tree. Internal plumbing nodes (e.g. the
       // dynamic-batch structurer) run server-side but aren't surfaced as cards.
       const wid = msg.workspace_id;
+      if (msg.node_type === "iteration" && wid) {
+        // The loop container itself: seed its badge state and mark it running.
+        _patchWorkspace(wid, (w) => ({
+          statusById: { ...w.statusById, [msg.node_id]: "running" },
+          iterById: { ...(w.iterById || {}), [msg.node_id]: { current: 0, max: msg.max_iterations, complete: false } },
+          currentStage: _stageContaining(w.spec, msg.node_id) || w.currentStage,
+        }));
+        break;
+      }
       if (msg.node_type === "terminal" && !msg.internal && wid) {
         const nodeId = msg.node_id;
         const parentId = msg.node_id != null ? msg.parent_id : null;
         const tabId = _nodeTabId(wid, nodeId);
-        if (!_state.tabs.find((t) => t.id === tabId)) {
+        const existing = _state.tabs.find((t) => t.id === tabId);
+        if (!existing) {
           const tab = { id: tabId, title: `Job ${nodeId}`, sessionId: msg.id, status: "running", isNode: true, workspaceId: wid, nodeId };
           _bySession.set(msg.id, tabId);
           _setState({ tabs: [..._state.tabs, tab] });
-          _patchWorkspace(wid, (w) => ({
-            statusById: { ...w.statusById, [nodeId]: "running" },
-            sessionById: { ...w.sessionById, [nodeId]: msg.id },
-            // Runtime-spawned fan-out children carry a parent_id; nest under it.
-            childrenByParent: parentId != null
-              ? { ...w.childrenByParent, [parentId]: [
-                  ...(w.childrenByParent?.[parentId] || []).filter((c) => c.nodeId !== nodeId),
-                  { nodeId, argv: msg.argv, sessionId: msg.id },
-                ] }
-              : (w.childrenByParent || {}),
-            currentStage: _stageContaining(w.spec, nodeId) || w.currentStage,
-          }));
+        } else if (existing.sessionId !== msg.id) {
+          // Same node id, NEW session = the next itr pass. Re-point the tab to the
+          // fresh session and re-attach its terminal (reset so the pass paints clean).
+          _bySession.delete(existing.sessionId);
+          _bySession.set(msg.id, tabId);
+          _patchTab(tabId, { sessionId: msg.id, status: "running" });
+          _reattachNode(tabId, msg.id);
         }
+        _patchWorkspace(wid, (w) => ({
+          statusById: { ...w.statusById, [nodeId]: "running" },
+          sessionById: { ...w.sessionById, [nodeId]: msg.id },
+          // Runtime-spawned fan-out children carry a parent_id; nest under it.
+          childrenByParent: parentId != null
+            ? { ...w.childrenByParent, [parentId]: [
+                ...(w.childrenByParent?.[parentId] || []).filter((c) => c.nodeId !== nodeId),
+                { nodeId, argv: msg.argv, sessionId: msg.id },
+              ] }
+            : (w.childrenByParent || {}),
+          currentStage: _stageContaining(w.spec, nodeId) || w.currentStage,
+        }));
       }
       break;
     }
@@ -287,6 +307,22 @@ function _handleMsg(msg) {
         outputs: msg.output != null
           ? { ...(w.outputs || {}), [msg.node_id]: { output: msg.output, exit_code: msg.exit_code } }
           : (w.outputs || {}),
+      }));
+      break;
+    }
+    case "iteration_started": {
+      const wid = msg.workspace_id;
+      if (msg.node_id == null || !wid) break;
+      _patchWorkspace(wid, (w) => ({
+        iterById: { ...(w.iterById || {}), [msg.node_id]: { current: msg.iteration, max: msg.max_iterations, complete: false } },
+      }));
+      break;
+    }
+    case "iteration_finished": {
+      const wid = msg.workspace_id;
+      if (msg.node_id == null || !wid) break;
+      _patchWorkspace(wid, (w) => ({
+        iterById: { ...(w.iterById || {}), [msg.node_id]: { ...(w.iterById?.[msg.node_id] || {}), complete: msg.complete } },
       }));
       break;
     }
@@ -397,6 +433,16 @@ export function unmountTab(tabId) {
  * the PipelineEngine), so we attach to it for replay + live output rather than
  * sending a "start".
  */
+/** Re-point an already-mounted node terminal to a fresh session (the next itr
+ *  pass): reset the grid so the new pass paints clean, then attach. If it isn't
+ *  mounted yet, do nothing — mountNodeTerm attaches to the tab's updated id. */
+function _reattachNode(tabId, sessionId) {
+  const rec = _terms.get(tabId);
+  if (!rec) return;
+  try { rec.main?.reset(); } catch (_) { /* terminal not open */ }
+  _send({ type: "attach", id: sessionId });
+}
+
 export function mountNodeTerm(tabId, host, agentNodeId = null) {
   if (_terms.has(tabId)) return; // already mounted; fixed grid needs no refit
   const tab = _state.tabs.find((t) => t.id === tabId);

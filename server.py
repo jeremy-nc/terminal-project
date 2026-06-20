@@ -41,6 +41,7 @@ from terminal import (
     SessionManager, Subscriber, build_node_tree, PipelineEngine, PipelineRun,
     WorkspaceStore,
 )
+from terminal.workspace_kinds import get_kind, kinds_manifest, WorkspaceError
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "frontend", "dist")
@@ -141,6 +142,8 @@ def _workspace_list_event(created: str = None) -> dict:
         "type": "workspace_list",
         "workspaces": [w.to_json() for w in workspaces.list()],
         "created": created,
+        # Kind manifest so the create modal can render kind-agnostically.
+        "kinds": kinds_manifest(),
     }
 
 
@@ -307,6 +310,13 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         if not spec:
             sub.send({"type": "error", "message": "missing pipeline spec"})
             return
+        # The workspace's effective dir (a plain folder, or its git worktree) is
+        # the run's base cwd — injected as the root sequence's cwd unless the DSL
+        # set its own `dir:` (which then wins). This is what makes a worktree
+        # workspace actually run its pipeline inside the worktree.
+        if isinstance(spec, dict) and spec.get("type") == "sequence" \
+                and not spec.get("cwd") and ws.dir:
+            spec = {**spec, "cwd": ws.dir}
         run = _start_pipeline(sub, hub, spec, msg.get("backend"), msg.get("input"),
                               workspace_id=wid, previous=ws.run)
         if run is not None:
@@ -403,15 +413,14 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         return
 
     if mtype == "create_workspace":
-        raw_dir = (msg.get("dir") or "").strip()
-        if not raw_dir:
-            sub.send({"type": "error", "message": "workspace requires a directory"})
+        kind_id = msg.get("kind", "directory")
+        # Back-compat: an older client sends {dir, name} with no kind/fields.
+        fields = msg.get("fields") or {"dir": msg.get("dir")}
+        try:
+            ws = workspaces.create(kind_id, fields, name=msg.get("name"))
+        except WorkspaceError as e:
+            sub.send({"type": "error", "message": str(e)})
             return
-        resolved = _resolve_cwd(raw_dir, None)
-        if not os.path.isdir(resolved):
-            sub.send({"type": "error", "message": f"directory does not exist: {resolved}"})
-            return
-        ws = workspaces.create(raw_dir, msg.get("name"))
         hub.send(_workspace_list_event(created=ws.id))
         return
 
@@ -421,7 +430,23 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         return
 
     if mtype == "delete_workspace":
-        workspaces.delete(msg.get("workspace_id"))
+        wid = msg.get("workspace_id")
+        ws = workspaces.get(wid)
+        if ws is None:
+            return
+        # Stop any in-flight run first (frees the worktree, kills child PTYs).
+        if ws.run is not None and ws.run.task is not None and not ws.run.task.done():
+            ws.run.task.cancel()
+        # The client decides per-close whether to tear down a worktree ("ask each
+        # time"). cleanup is safe by default (git refuses on uncommitted changes);
+        # if it refuses and the user hasn't opted to force, KEEP the workspace so
+        # they can retry with Force or choose Keep — and tell the closer why.
+        if msg.get("remove_resources"):
+            warnings = get_kind(ws.kind).cleanup(ws.meta, force=bool(msg.get("force")))
+            if warnings and not msg.get("force"):
+                sub.send({"type": "workspace_cleanup_blocked", "workspace_id": wid, "message": warnings[0]})
+                return
+        workspaces.delete(wid)
         hub.send(_workspace_list_event())
         return
 

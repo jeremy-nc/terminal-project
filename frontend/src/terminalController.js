@@ -26,9 +26,28 @@ let _state = {
   // Workspaces ("sessions"): each is a persisted definition (id/name/dir/dsl)
   // PLUS its live run state, updated by events routed via workspace_id. Several
   // can run concurrently; the dashboard renders the active one.
-  workspaces: [],       // [{ id, name, dir, dsl, status, spec, statusById, sessionById, childrenByParent, outputs, result, warnings, error, currentStage }]
+  workspaces: [],       // [{ id, name, dir, dsl, kind, meta, status, spec, statusById, sessionById, childrenByParent, outputs, result, warnings, error, currentStage }]
   activeWorkspaceId: null,
+  // Workspace-kind manifest from the server: [{ id, label, fields }]. Drives the
+  // create modal kind-agnostically (a new backend kind appears with no UI change).
+  kinds: [],
+  // Set when a worktree removal was refused (e.g. dirty tree) so the close dialog
+  // can offer Force: { workspaceId, message }. Cleared once that workspace closes.
+  closeBlocked: null,
+  // Transient error/notice toasts: [{ id, message, kind }]. Auto-dismiss.
+  toasts: [],
 };
+
+let _toastSeq = 0;
+function _pushToast(message, kind = "error") {
+  const id = ++_toastSeq;
+  _setState({ toasts: [..._state.toasts, { id, message, kind }] });
+  setTimeout(() => {
+    if (_state.toasts.some((t) => t.id === id)) {
+      _setState({ toasts: _state.toasts.filter((t) => t.id !== id) });
+    }
+  }, 7000);
+}
 
 let _tabCounter = 0;
 let _autoTerm = false;  // have we auto-created the first interactive terminal?
@@ -219,14 +238,27 @@ function _handleMsg(msg) {
       // its locally-edited dsl (only newly-appearing ones adopt the server dsl).
       const defs = msg.workspaces || [];
       const existing = new Map(_state.workspaces.map((w) => [w.id, w]));
+      // Workspaces removed (here or by another window): drop their node-card tabs.
+      for (const id of existing.keys()) {
+        if (!defs.find((d) => d.id === id)) _clearWorkspaceNodeTabs(id);
+      }
       const merged = defs.map((d) =>
         existing.has(d.id)
-          ? { ...existing.get(d.id), name: d.name, dir: d.dir }
-          : { id: d.id, name: d.name, dir: d.dir, dsl: d.dsl || "", ..._blankRunState() }
+          ? { ...existing.get(d.id), name: d.name, dir: d.dir, kind: d.kind, meta: d.meta }
+          : { id: d.id, name: d.name, dir: d.dir, dsl: d.dsl || "", kind: d.kind || "directory", meta: d.meta || {}, ..._blankRunState() }
       );
       let active = msg.created || _state.activeWorkspaceId;
       if (!merged.find((w) => w.id === active)) active = merged[0]?.id ?? null;
-      _setState({ workspaces: merged, activeWorkspaceId: active });
+      // Clear a stale block once its workspace is gone.
+      const blocked = _state.closeBlocked && merged.find((w) => w.id === _state.closeBlocked.workspaceId)
+        ? _state.closeBlocked : null;
+      _setState({ workspaces: merged, activeWorkspaceId: active, kinds: msg.kinds || _state.kinds, closeBlocked: blocked });
+      break;
+    }
+    case "workspace_cleanup_blocked": {
+      // A worktree removal was refused (dirty tree). Surface it so the close
+      // dialog can offer Force; the workspace stays until resolved.
+      _setState({ closeBlocked: { workspaceId: msg.workspace_id, message: msg.message } });
       break;
     }
     case "pipeline_started": {
@@ -358,6 +390,7 @@ function _handleMsg(msg) {
     }
     case "error":
       console.warn("[ws] server error:", msg.message);
+      _pushToast(msg.message);
       break;
   }
 }
@@ -504,15 +537,29 @@ export function mountNodeTerm(tabId, host, agentNodeId = null) {
 }
 
 
-// ── workspace ("session") actions ────────────────────────────────────────────
-export function createWorkspace(dir, name) {
-  _send({ type: "create_workspace", dir, name });
+// ── workspace actions ────────────────────────────────────────────────────────
+/** Create a workspace of `kind` (e.g. "directory" | "worktree") from the modal's
+ *  field values. The backend's kind adapter provisions the working dir. */
+export function createWorkspace(kind, fields) {
+  _send({ type: "create_workspace", kind, fields });
 }
 
-export function deleteWorkspace(wid) {
-  cancelWorkspace(wid);
-  _clearWorkspaceNodeTabs(wid);
-  _send({ type: "delete_workspace", workspace_id: wid });
+export function deleteWorkspace(wid, opts = {}) {
+  // Server-authoritative: it cancels the run, optionally tears down resources
+  // (opts.remove_resources / opts.force), and broadcasts the new list — which is
+  // where this window drops the workspace's node tabs. A dirty worktree removal
+  // is refused and replies with workspace_cleanup_blocked (the workspace stays).
+  _send({ type: "delete_workspace", workspace_id: wid, ...opts });
+}
+
+/** Dismiss a pending removal block (e.g. the user cancelled the close dialog). */
+export function clearCloseBlocked() {
+  if (_state.closeBlocked) _setState({ closeBlocked: null });
+}
+
+/** Dismiss a toast by id (click-to-close). */
+export function dismissToast(id) {
+  _setState({ toasts: _state.toasts.filter((t) => t.id !== id) });
 }
 
 export function selectWorkspace(wid) {

@@ -327,6 +327,162 @@ html, body { background: var(--bg); }
 }
 .ws-new:hover { color: var(--text); border-color: var(--border-strong); }
 
+.ws-kind-badge {
+  font-size: 11px;
+  color: var(--accent-hover, #9b8cff);
+  pointer-events: none;
+}
+
+/* ── create-workspace modal ─────────────────────────────────────────────── */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+.modal-card {
+  width: 460px;
+  max-width: calc(100vw - 32px);
+  background: var(--surface, #161619);
+  border: 1px solid var(--border-strong, #2a2a3a);
+  border-radius: 10px;
+  padding: 20px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+}
+.modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text, #ededef);
+  margin-bottom: 16px;
+}
+.modal-kinds {
+  display: flex;
+  gap: 18px;
+  margin-bottom: 16px;
+}
+.modal-kind {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text, #ededef);
+  cursor: pointer;
+}
+.modal-kind input { accent-color: var(--accent, #7c6cff); }
+.modal-fields { display: flex; flex-direction: column; gap: 12px; }
+.modal-field { display: flex; align-items: center; gap: 12px; }
+.modal-field label {
+  width: 56px;
+  flex-shrink: 0;
+  font-size: 13px;
+  color: var(--text-muted, #9a9aa3);
+  text-align: right;
+}
+.modal-field input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg, #0e0e10);
+  border: 1px solid var(--border, #2a2a3a);
+  border-radius: 6px;
+  padding: 8px 10px;
+  color: var(--text, #ededef);
+  font-family: inherit;
+  font-size: 13px;
+}
+.modal-field input:focus { outline: none; border-color: var(--accent, #7c6cff); }
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
+}
+.modal-actions button {
+  border-radius: 6px;
+  padding: 7px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid var(--border, #2a2a3a);
+}
+.modal-cancel { background: transparent; color: var(--text-muted, #9a9aa3); }
+.modal-cancel:hover { color: var(--text, #ededef); border-color: var(--border-strong, #3a3a4a); }
+.modal-create {
+  background: var(--accent, #7c6cff);
+  color: #fff;
+  border-color: var(--accent, #7c6cff);
+}
+.modal-create:hover { background: var(--accent-hover, #8f7fff); }
+.modal-create:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.modal-body {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-muted, #9a9aa3);
+}
+.modal-body code {
+  font-family: "SF Mono", ui-monospace, Menlo, monospace;
+  font-size: 12px;
+  color: var(--text, #ededef);
+  background: var(--bg, #0e0e10);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.modal-warn {
+  margin-top: 12px;
+  padding: 9px 11px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #f7c948;
+  background: rgba(234, 179, 8, 0.12);
+  border: 1px solid rgba(234, 179, 8, 0.3);
+  border-radius: 6px;
+}
+.modal-keep {
+  background: transparent;
+  color: var(--text, #ededef);
+}
+.modal-keep:hover { border-color: var(--border-strong, #3a3a4a); }
+.modal-danger {
+  background: #b3261e;
+  color: #fff;
+  border-color: #b3261e;
+}
+.modal-danger:hover { background: #c8362e; }
+
+/* ── toasts ─────────────────────────────────────────────────────────────── */
+.toasts {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 1100;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 440px;
+}
+.toast {
+  padding: 10px 13px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  line-height: 1.4;
+  cursor: pointer;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  white-space: pre-wrap;
+  word-break: break-word;
+  animation: toast-in 140ms ease-out;
+}
+.toast-error {
+  background: #2a1416;
+  color: #ffb4ab;
+  border: 1px solid #5c2a26;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
 /* Stack of per-workspace dashboards; only the active one is shown (the rest are
    display:none so their node terminals stay mounted, never re-attached). */
 .ws-panels { flex: 1; min-width: 0; min-height: 0; display: flex; }

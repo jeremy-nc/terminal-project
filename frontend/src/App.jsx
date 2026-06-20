@@ -1,7 +1,7 @@
 import React, { useSyncExternalStore, useEffect, useState, useMemo } from "react";
 import {
   subscribe, getSnapshot,
-  newTab, activateTab, closeTab, restartTab, fitActive, refitNodes,
+  newTab, activateTab, closeTab, restartTab, fitActive, refitNodes, dismissToast,
 } from "./terminalController.js";
 import TabBar from "./components/TabBar.jsx";
 import TabStage from "./components/TabStage.jsx";
@@ -11,7 +11,7 @@ import WorkspaceTabBar from "./components/WorkspaceTabBar.jsx";
 import SharedNodeView from "./components/SharedNodeView.jsx";
 
 export default function App() {
-  const { status, tabs, activeTabId, workspaces, activeWorkspaceId } = useSyncExternalStore(subscribe, getSnapshot);
+  const { status, tabs, activeTabId, workspaces, activeWorkspaceId, kinds, closeBlocked, toasts } = useSyncExternalStore(subscribe, getSnapshot);
   // A shared deep-link (/shared/workspace/{wid}/t/{nodeId}) just selects the
   // Share view with this target; no separate page.
   const shareTarget = useMemo(() => {
@@ -89,7 +89,7 @@ export default function App() {
           className="pipeline-view-wrap"
           style={{ display: view === "pipeline" ? "flex" : "none" }}
         >
-          <WorkspaceTabBar workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} />
+          <WorkspaceTabBar workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} kinds={kinds} closeBlocked={closeBlocked} />
           <div className="ws-panels">
             {workspaces.length === 0 ? (
               <div className="ws-empty">Create a session (+) to define and run a pipeline.</div>
@@ -146,6 +146,21 @@ export default function App() {
       </div>
 
       <InputBar />
+
+      {toasts.length > 0 && (
+        <div className="toasts">
+          {toasts.map((t) => (
+            <div
+              key={t.id}
+              className={`toast toast-${t.kind}`}
+              onClick={() => dismissToast(t.id)}
+              title="Dismiss"
+            >
+              {t.message}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

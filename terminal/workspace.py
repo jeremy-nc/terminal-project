@@ -16,22 +16,31 @@ import json
 import os
 import uuid
 
+from .workspace_kinds import get_kind
+
 
 class Workspace:
-    def __init__(self, id: str, name: str, dir: str, dsl: str = ""):
+    def __init__(self, id: str, name: str, dir: str, dsl: str = "",
+                 kind: str = "directory", meta: dict = None):
         self.id = id
         self.name = name
-        self.dir = dir          # working directory (raw, may contain ~)
+        self.dir = dir          # EFFECTIVE working directory (a kind's prepared cwd)
         self.dsl = dsl          # side-panel pipeline source
+        # How the dir was provisioned ("directory" | "worktree" | …) and the
+        # kind-specific details (repo, branch, worktree_path) used for cleanup.
+        self.kind = kind or "directory"
+        self.meta = meta or {}
         self.run = None         # current PipelineRun (in-memory context); set on execute
 
     def to_json(self) -> dict:
         """The persisted definition subset (run context is transient)."""
-        return {"id": self.id, "name": self.name, "dir": self.dir, "dsl": self.dsl}
+        return {"id": self.id, "name": self.name, "dir": self.dir, "dsl": self.dsl,
+                "kind": self.kind, "meta": self.meta}
 
     @classmethod
     def from_json(cls, d: dict) -> "Workspace":
-        return cls(d["id"], d.get("name", ""), d.get("dir", ""), d.get("dsl", ""))
+        return cls(d["id"], d.get("name", ""), d.get("dir", ""), d.get("dsl", ""),
+                   kind=d.get("kind", "directory"), meta=d.get("meta") or {})
 
 
 class WorkspaceStore:
@@ -68,11 +77,14 @@ class WorkspaceStore:
     def get(self, wid: str):
         return self._workspaces.get(wid)
 
-    def create(self, dir: str, name: str = None) -> Workspace:
+    def create(self, kind_id: str, fields: dict, name: str = None) -> Workspace:
+        """Provision a workspace of ``kind_id`` from the modal ``fields``. The
+        kind's ``prepare`` sets up the working dir (e.g. adds a git worktree) and
+        returns the effective cwd + meta. Raises WorkspaceError on failure."""
+        prepared = get_kind(kind_id).prepare(fields or {})
         wid = uuid.uuid4().hex[:8]
-        # Default name: the directory's basename, else a numbered fallback.
-        name = name or os.path.basename(os.path.normpath(os.path.expanduser(dir))) or f"session-{len(self._workspaces) + 1}"
-        ws = Workspace(wid, name, dir, "")
+        name = name or prepared.get("name") or f"workspace-{len(self._workspaces) + 1}"
+        ws = Workspace(wid, name, prepared["cwd"], "", kind=kind_id, meta=prepared.get("meta") or {})
         self._workspaces[wid] = ws
         self._save()
         return ws

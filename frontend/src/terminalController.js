@@ -8,6 +8,7 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { b64dec, strToB64 } from "./wire.js";
+import { APP_FX_TYPES } from "./appFx.js";
 
 const WS_URL = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 
@@ -36,7 +37,26 @@ let _state = {
   closeBlocked: null,
   // Transient error/notice toasts: [{ id, message, kind }]. Auto-dismiss.
   toasts: [],
+  // github.pulls subdomain: the viewer's open PR inbox (raised/assigned/review),
+  // refreshed on every socket (re)connect + manual refresh.
+  prs: [],
+  prsViewer: null,
+  prsLoading: false,
+  prsError: null,
+  prsUpdatedAt: null,
+  // repos domain: local owner/name -> path index + configured roots. Broadcast on
+  // connect; drives the repos dropdown and resolving a PR to its local checkout.
+  repos: [],
+  repoRoots: [],
+  // Active whole-app animations: [{ type, key }]. Several can run at once so a
+  // view/action can fire a combination of effects. <AppFx/> renders each.
+  appFx: [],
+  // Create-workspace modal: null = closed; { kind?, fields? } = open (optionally
+  // pre-filled, e.g. from a /pipeline/new-workspace deep-link or a PR action).
+  newWorkspace: null,
 };
+
+let _fxSeq = 0;
 
 let _toastSeq = 0;
 function _pushToast(message, kind = "error") {
@@ -132,6 +152,9 @@ function _connect() {
     // One sync hands this window the SHARED terminal + workspace lists and
     // replays any running pipelines, so it mirrors the other windows.
     _send({ type: "sync" });
+    // Fetch the GitHub PR inbox on every (re)connect, so the data is fresh
+    // whenever the socket establishes — not just when the PR view is opened.
+    listPrs();
     // Reconnect: re-subscribe any already-mounted terminals (reset first so the
     // replay doesn't duplicate what's already on screen).
     for (const tabId of _terms.keys()) {
@@ -259,6 +282,20 @@ function _handleMsg(msg) {
       // A worktree removal was refused (dirty tree). Surface it so the close
       // dialog can offer Force; the workspace stays until resolved.
       _setState({ closeBlocked: { workspaceId: msg.workspace_id, message: msg.message } });
+      break;
+    }
+    case "repos": {
+      _setState({ repos: msg.repos || [], repoRoots: msg.roots || [] });
+      break;
+    }
+    case "prs": {
+      _setState({
+        prs: msg.prs || [],
+        prsViewer: msg.viewer ?? _state.prsViewer,
+        prsError: msg.error || null,
+        prsLoading: false,
+        prsUpdatedAt: Date.now(),
+      });
       break;
     }
     case "pipeline_started": {
@@ -391,6 +428,9 @@ function _handleMsg(msg) {
     case "error":
       console.warn("[ws] server error:", msg.message);
       _pushToast(msg.message);
+      break;
+    case "notice":
+      _pushToast(msg.message, "info");
       break;
   }
 }
@@ -562,6 +602,49 @@ export function dismissToast(id) {
   _setState({ toasts: _state.toasts.filter((t) => t.id !== id) });
 }
 
+// ── whole-app FX ─────────────────────────────────────────────────────────────
+/** Play a whole-app animation by type (see appFx.js). Adds it to the active set
+ *  (so combinations run concurrently) with a fresh key; auto-removes after the
+ *  type's duration. */
+export function playAppFx(type) {
+  const cfg = APP_FX_TYPES[type];
+  if (!cfg) return;
+  const key = ++_fxSeq;
+  _setState({ appFx: [..._state.appFx, { type, key }] });
+  setTimeout(() => {
+    _setState({ appFx: _state.appFx.filter((f) => f.key !== key) });
+  }, cfg.duration);
+}
+
+// ── create-workspace modal ───────────────────────────────────────────────────
+/** Open the create-workspace modal, optionally pre-filled: { kind, fields }. */
+export function openNewWorkspace(prefill) {
+  _setState({ newWorkspace: prefill || {} });
+}
+export function closeNewWorkspace() {
+  if (_state.newWorkspace) _setState({ newWorkspace: null });
+}
+
+// ── repos ────────────────────────────────────────────────────────────────────
+/** Set the local-repo scan roots (persisted server-side, then re-indexed). */
+export function setRepoRoots(roots) {
+  _send({ type: "set_repo_roots", roots });
+}
+/** Re-scan the roots for local repos. */
+export function refreshRepos() {
+  _send({ type: "refresh_repos" });
+}
+
+// ── github.pulls ─────────────────────────────────────────────────────────────
+/** Request the viewer's open PR inbox (raised / assigned / review-requested).
+ *  Called on every socket (re)connect and by the manual refresh button. */
+export function listPrs() {
+  if (_ws && _ws.readyState === WebSocket.OPEN) {
+    _setState({ prsLoading: true });
+    _send({ type: "list_prs" });
+  }
+}
+
 export function selectWorkspace(wid) {
   _setState({ activeWorkspaceId: wid });
   setTimeout(refitNodes, 0); // the now-visible workspace's node terminals
@@ -730,6 +813,22 @@ export function refitNodes() {
   for (const tabId of _terms.keys()) {
     if (tabId.includes("::node-")) fitTab(tabId);
   }
+}
+
+/** Read a node terminal's current on-screen rows as plain strings — for the 3D
+ *  world's in-room screens. Uses the live xterm we already keep mounted (fed by
+ *  the existing stdout stream), so it's fully decoupled: no backend call, no extra
+ *  state. Returns null if that terminal isn't mounted yet. */
+export function readNodeScreen(tabId) {
+  const term = _terms.get(tabId)?.main;
+  if (!term) return null;
+  const buf = term.buffer.active;
+  const rows = [];
+  for (let y = 0; y < term.rows; y++) {
+    const line = buf.getLine(buf.baseY + y);
+    rows.push(line ? line.translateToString(true) : "");
+  }
+  return { rows, cols: term.cols };
 }
 
 // ── useSyncExternalStore API ─────────────────────────────────────────────────

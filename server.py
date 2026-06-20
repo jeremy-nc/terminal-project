@@ -42,10 +42,13 @@ from terminal import (
     WorkspaceStore,
 )
 from terminal.workspace_kinds import get_kind, kinds_manifest, WorkspaceError
+from github.pulls import fetch_my_pulls, GitHubAuthError
+from repos import RepoIndex
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "frontend", "dist")
 WORKSPACES_FILE = os.path.join(HERE, "workspaces.json")
+REPOS_FILE = os.path.join(HERE, "repos.json")
 
 
 def b64(data: bytes) -> str:
@@ -117,6 +120,7 @@ class Hub:
 
 manager = SessionManager()
 workspaces = WorkspaceStore(WORKSPACES_FILE)
+repo_index = RepoIndex(REPOS_FILE)  # local owner/name -> path map (scanned at startup)
 hub = Hub()
 
 # Shared interactive-terminal registry (the Terminal-view tabs), mirrored to all
@@ -137,6 +141,13 @@ def _create_terminal(shell: str, cols: int, rows: int):
     return sess
 
 
+def _repos_event() -> dict:
+    """The local-repo index for the client: configured roots + owner/name->path
+    map. Broadcast so every window can resolve a PR to its local checkout and
+    show/edit the roots near the connection indicator."""
+    return {"type": "repos", **repo_index.to_json()}
+
+
 def _workspace_list_event(created: str = None) -> dict:
     return {
         "type": "workspace_list",
@@ -147,13 +158,36 @@ def _workspace_list_event(created: str = None) -> dict:
     }
 
 
+PR_POLL_INTERVAL = 180  # seconds — refresh the PR inbox every 3 minutes
+
+
+async def _poll_pulls():
+    """Refresh the github.pulls inbox on an interval and broadcast to every window
+    (hub), so an open PR view updates without a manual refresh. Paused when no
+    windows are connected — don't call GitHub for nobody. The client's on-connect
+    fetch covers the initial load, so this only sleeps-then-polls."""
+    while True:
+        await asyncio.sleep(PR_POLL_INTERVAL)
+        if hub.empty():
+            continue
+        try:
+            res = await fetch_my_pulls()
+            hub.send({"type": "prs", **res})
+        except GitHubAuthError as e:
+            hub.send({"type": "prs", "prs": [], "error": str(e)})
+        except Exception as e:  # never let a transient error kill the loop
+            print(f"[pulls] poll error: {e}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     manager.loop = asyncio.get_running_loop()
     # Kill any stale tmux server so sessions started by this run pick up the
     # current tmux.conf (tmux only reads its config when the server starts).
     manager.reset_backend()
+    pulls_task = asyncio.create_task(_poll_pulls())
     yield
+    pulls_task.cancel()
     manager.shutdown_all()
 
 
@@ -171,10 +205,12 @@ async def index():
     )
 
 
-# Shared deep-links (/shared/workspace/{id}/t/{nodeId}) are client-side routes,
-# so serve the SPA shell for any /shared/* path; the frontend reads the URL.
+# Client-side deep-link routes — serve the SPA shell; the frontend reads the URL:
+#   /shared/workspace/{id}/t/{nodeId}  -> Share view
+#   /pipeline/new-workspace?…          -> pre-filled create-workspace modal
 @app.get("/shared/{rest:path}")
-async def shared(rest: str):
+@app.get("/pipeline/{rest:path}")
+async def spa_route(rest: str):
     return FileResponse(
         os.path.join(DIST, "index.html"),
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
@@ -370,6 +406,7 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         # own subscribers as the window attaches per node card.)
         sub.send(_terminal_list_event())
         sub.send(_workspace_list_event())
+        sub.send(_repos_event())
         for ws in workspaces.list():
             run = ws.run
             if run and run.task and not run.task.done():
@@ -421,6 +458,10 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         except WorkspaceError as e:
             sub.send({"type": "error", "message": str(e)})
             return
+        # Transparency: if the worktree's branch came from origin (e.g. a PR/
+        # dependabot branch we had to fetch), say so.
+        if ws.meta.get("source") == "remote":
+            sub.send({"type": "notice", "message": f"Fetched origin/{ws.meta.get('branch')} and created the worktree."})
         hub.send(_workspace_list_event(created=ws.id))
         return
 
@@ -434,26 +475,72 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         ws = workspaces.get(wid)
         if ws is None:
             return
-        # Stop any in-flight run first (frees the worktree, kills child PTYs).
-        if ws.run is not None and ws.run.task is not None and not ws.run.task.done():
-            ws.run.task.cancel()
-        # The client decides per-close whether to tear down a worktree ("ask each
-        # time"). cleanup is safe by default (git refuses on uncommitted changes);
-        # if it refuses and the user hasn't opted to force, KEEP the workspace so
-        # they can retry with Force or choose Keep — and tell the closer why.
-        if msg.get("remove_resources"):
-            warnings = get_kind(ws.kind).cleanup(ws.meta, force=bool(msg.get("force")))
-            if warnings and not msg.get("force"):
-                sub.send({"type": "workspace_cleanup_blocked", "workspace_id": wid, "message": warnings[0]})
-                return
-        workspaces.delete(wid)
-        hub.send(_workspace_list_event())
+        remove = bool(msg.get("remove_resources"))
+        force = bool(msg.get("force"))
+
+        async def _close():
+            # Stop any in-flight run and WAIT for its teardown (child PTYs killed,
+            # processes exited) BEFORE touching the worktree — otherwise cleanup
+            # would run under a live process and race the kill.
+            if ws.run is not None and ws.run.task is not None and not ws.run.task.done():
+                ws.run.task.cancel()
+                try:
+                    await ws.run.task
+                except (asyncio.CancelledError, Exception):
+                    pass
+            # The client decides per-close whether to tear down a worktree ("ask
+            # each time"). cleanup is safe by default (git refuses on uncommitted
+            # changes); if it refuses and the user didn't force, KEEP the workspace
+            # so they can retry with Force or choose Keep — and say why. The git
+            # work runs off the event loop so it never blocks other windows.
+            if remove:
+                warnings = await asyncio.get_running_loop().run_in_executor(
+                    None, lambda: get_kind(ws.kind).cleanup(ws.meta, force=force))
+                if warnings and not force:
+                    sub.send({"type": "workspace_cleanup_blocked", "workspace_id": wid, "message": warnings[0]})
+                    return
+            workspaces.delete(wid)
+            hub.send(_workspace_list_event())
+
+        asyncio.create_task(_close())
+        return
+
+    if mtype == "set_repo_roots":
+        # Update the configured scan roots (persisted) and re-index. Scan shells
+        # git per repo, so run it off the event loop, then broadcast the new map.
+        async def _set_roots():
+            await asyncio.get_running_loop().run_in_executor(
+                None, repo_index.set_roots, msg.get("roots") or [])
+            hub.send(_repos_event())
+        asyncio.create_task(_set_roots())
+        return
+
+    if mtype == "refresh_repos":
+        async def _refresh():
+            await asyncio.get_running_loop().run_in_executor(None, repo_index.scan)
+            hub.send(_repos_event())
+        asyncio.create_task(_refresh())
+        return
+
+    if mtype == "list_prs":
+        # github.pulls subdomain — fetch the viewer's open PRs (raised / assigned /
+        # review-requested) via gh. Async (gh call), so reply on a task. The client
+        # asks on connect/reconnect (so data is fresh per connection) + manual refresh.
+        async def _list_prs():
+            try:
+                res = await fetch_my_pulls()
+                sub.send({"type": "prs", **res})
+            except GitHubAuthError as e:
+                sub.send({"type": "prs", "prs": [], "error": str(e)})
+        asyncio.create_task(_list_prs())
         return
 
     sess = manager.sessions.get(msg.get("id"))
     if mtype == "attach":
         if not sess:
-            sub.send({"type": "error", "message": "no such session"})
+            # The session already ended (e.g. a cancelled/closed run that the
+            # client re-attaches to a beat later). Nothing to subscribe to —
+            # silently ignore rather than surfacing a spurious error toast.
             return
         manager.attach(sess, sub)
         sub.send(

@@ -145,6 +145,17 @@ default branch `main`). Verified layout: a top-level `skills/` directory holds
       a per-node flag) so authors opt in; pairs well with commands that read
       stdin (`cat`, `jq`, an LLM CLI's `-`/prompt-on-stdin mode). Keeps the
       current arg-substitution form for cases that genuinely want it.
+- [ ] Fork-PR worktrees ("Work on this" from the PR list). Today `WorktreeKind`
+      resolves a branch as: local → checkout, on `origin` → fetch + track
+      (the dependabot / same-repo case), neither → new branch off HEAD. A PR
+      from a **fork** has its head on another repo, so `origin/<branch>` doesn't
+      exist and it falls back to a (wrong) new branch. Fix: when the PR is a
+      fork (`github.pulls` already returns `isFork` + the PR `number`), fetch the
+      PR head ref instead — `git fetch origin pull/<number>/head` — and create
+      the worktree from `FETCH_HEAD` (you can't push back to origin for a fork,
+      so it's a read/review worktree). Thread the PR number through the
+      `/pipeline/new-workspace` prefill so the worktree adapter knows to use the
+      pull-ref path.
 - [ ] Persistent pipeline history in the sidebar.
 - [ ] Support for more complex DSL structures (nested batches/sequences).
 - [ ] Advanced terminal features (search, clear buffer).

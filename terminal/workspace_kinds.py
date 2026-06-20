@@ -78,6 +78,25 @@ def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
 
 
+def _prune_empty_parents(worktree_path: str, base: str) -> None:
+    """Remove now-empty directories from the worktree's parent up to and including
+    ``base`` (the ``.worktrees`` container). A slashed branch
+    (``dependabot/terraform/infrastructure``) nests the worktree under intermediate
+    dirs; ``git worktree remove`` deletes only the leaf, so without this the empty
+    parents (and the container) linger. Stops at the first non-empty dir (another
+    worktree) and never climbs above ``base``."""
+    base = os.path.normpath(base)
+    d = os.path.dirname(os.path.normpath(worktree_path))
+    while d == base or d.startswith(base + os.sep):
+        try:
+            os.rmdir(d)            # only succeeds if the directory is empty
+        except OSError:
+            break                  # non-empty (another worktree) or already gone
+        if d == base:
+            break
+        d = os.path.dirname(d)
+
+
 class WorktreeKind(WorkspaceKind):
     """Git worktree: the path is a git repo (bare or normal); ``name`` becomes a
     new branch checked out in a fresh worktree at ``<repo>.worktrees/<branch>``.
@@ -91,10 +110,13 @@ class WorktreeKind(WorkspaceKind):
         {"name": "name", "label": "name", "placeholder": "conn-450-fix-user-bug"},
     )
 
-    def _worktree_path(self, repo: str, branch: str) -> str:
-        # Strip a trailing .git so a bare ~/Code/foo.git -> ~/Code/foo.worktrees/<branch>.
+    def _worktree_base(self, repo: str) -> str:
+        # Strip a trailing .git so a bare ~/Code/foo.git -> ~/Code/foo.worktrees.
         base = repo[:-4] if repo.endswith(".git") else repo
-        return os.path.join(base + ".worktrees", branch)
+        return base + ".worktrees"
+
+    def _worktree_path(self, repo: str, branch: str) -> str:
+        return os.path.join(self._worktree_base(repo), branch)
 
     def prepare(self, fields: dict) -> dict:
         repo = _expand(fields.get("dir") or "")
@@ -112,26 +134,71 @@ class WorktreeKind(WorkspaceKind):
         if os.path.exists(path):
             raise WorkspaceError(f"worktree path already exists: {path}")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        # Create a NEW branch when the name is new; check out the EXISTING branch
-        # when it already exists (the natural "open the ticket branch" flow). git
-        # refuses if that branch is already checked out in another worktree.
-        exists = _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0
-        add = _git(repo, "worktree", "add", path, *(([branch]) if exists else ["-b", branch]))
+        # Choose the worktree's branch source:
+        #   local branch exists        -> check it out (the "open my ticket branch" case)
+        #   else origin has the branch -> fetch it + create a tracking branch
+        #                                 (the dependabot / PR-branch case — the real
+        #                                  commits live on origin, so we must fetch;
+        #                                  fetch is non-destructive, never a merge)
+        #   else                       -> create a new branch off the repo's default
+        #                                 branch (origin/<default>), fetched fresh
+        base_ref = None
+        if _git(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}").returncode == 0:
+            source = "local"
+            add = _git(repo, "worktree", "add", path, branch)
+        elif self._origin_has_branch(repo, branch):
+            source = "remote"
+            fetch = _git(repo, "fetch", "origin", f"+{branch}:refs/remotes/origin/{branch}")
+            if fetch.returncode != 0:
+                raise WorkspaceError(f"git fetch origin {branch} failed: {(fetch.stderr or fetch.stdout).strip()}")
+            add = _git(repo, "worktree", "add", "--track", "-b", branch, path, f"origin/{branch}")
+        else:
+            source = "new"
+            # Base a genuinely-new branch on the repo's DEFAULT branch (origin/HEAD,
+            # usually main), FETCHED FRESH — not the main checkout's current HEAD,
+            # which may be parked on another branch and would leak its commits into
+            # the new one. Fetch is non-destructive (download only, never a merge).
+            # Fall back to local HEAD if the remote default can't be resolved.
+            base = self._default_branch(repo)
+            if base:
+                _git(repo, "fetch", "origin", base)
+                if _git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{base}").returncode == 0:
+                    base_ref = f"origin/{base}"
+            args = ["worktree", "add", "-b", branch, path] + ([base_ref] if base_ref else [])
+            add = _git(repo, *args)
         if add.returncode != 0:
+            _prune_empty_parents(path, self._worktree_base(repo))  # don't leave the dirs we made
             raise WorkspaceError(f"git worktree add failed: {(add.stderr or add.stdout).strip()}")
-        return {
-            "cwd": path,
-            "name": name,
-            "meta": {"repo": repo, "name": name, "branch": branch,
-                     "worktree_path": path, "new_branch": not exists},
-        }
+        # source: local | remote (fetched from origin) | new
+        meta = {"repo": repo, "name": name, "branch": branch,
+                "worktree_path": path, "source": source}
+        if base_ref:
+            meta["base"] = base_ref   # e.g. "origin/main" — what the new branch forks from
+        return {"cwd": path, "name": name, "meta": meta}
+
+    def _origin_has_branch(self, repo: str, branch: str) -> bool:
+        r = _git(repo, "ls-remote", "--heads", "origin", branch)
+        return r.returncode == 0 and bool(r.stdout.strip())
+
+    def _default_branch(self, repo: str):
+        """The remote's default branch name (e.g. 'main'), or None. Reads the local
+        refs/remotes/origin/HEAD (set at clone), falling back to main/master."""
+        r = _git(repo, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+        if r.returncode == 0 and r.stdout.strip():
+            return r.stdout.strip().rsplit("/", 1)[-1]
+        for b in ("main", "master"):
+            if _git(repo, "rev-parse", "--verify", "--quiet", f"refs/remotes/origin/{b}").returncode == 0:
+                return b
+        return None
 
     def cleanup(self, meta: dict, force: bool = False) -> list:
         repo, path = (meta or {}).get("repo"), (meta or {}).get("worktree_path")
         if not repo or not path:
             return []
+        base = self._worktree_base(repo)
         if not os.path.exists(path):
             _git(repo, "worktree", "prune")  # already gone — just tidy metadata
+            _prune_empty_parents(path, base)
             return []
         args = ["worktree", "remove", path] + (["--force"] if force else [])
         res = _git(repo, *args)
@@ -139,6 +206,9 @@ class WorktreeKind(WorkspaceKind):
             reason = (res.stderr or res.stdout).strip() or "worktree has uncommitted changes"
             return [f"Worktree kept at {path}: {reason} (use Force to discard)"]
         _git(repo, "worktree", "prune")
+        # Remove the now-empty parent dirs a slashed branch nested the worktree
+        # under (and the .worktrees container if this was the last one).
+        _prune_empty_parents(path, base)
         return []
 
 

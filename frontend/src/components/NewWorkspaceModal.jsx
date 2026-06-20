@@ -7,11 +7,13 @@ const FALLBACK_KINDS = [
   { id: "directory", label: "Directory", fields: [{ name: "dir", label: "path", placeholder: "~/Code/my-project" }] },
 ];
 
-export default function NewWorkspaceModal({ kinds, onCreate, onClose }) {
+export default function NewWorkspaceModal({ kinds, onCreate, onClose, initial }) {
   const list = kinds && kinds.length ? kinds : FALLBACK_KINDS;
-  const [kindId, setKindId] = useState(list[0].id);
+  // Seed from a prefill (deep-link / PR action) when present, else defaults.
+  const seedKind = initial?.kind && list.some((k) => k.id === initial.kind) ? initial.kind : list[0].id;
+  const [kindId, setKindId] = useState(seedKind);
   const kind = useMemo(() => list.find((k) => k.id === kindId) || list[0], [list, kindId]);
-  const [values, setValues] = useState({});
+  const [values, setValues] = useState(initial?.fields || {});
   const firstRef = useRef(null);
 
   useEffect(() => { firstRef.current?.focus(); }, [kindId]);

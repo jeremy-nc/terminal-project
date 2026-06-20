@@ -4,6 +4,39 @@ import { parseDsl } from "../pipelineDsl.js";
 import { b64dec } from "../wire.js";
 import OpenInTerminalButton from "./OpenInTerminalButton.jsx";
 import CopyLinkButton from "./CopyLinkButton.jsx";
+import WorldView from "./WorldView.jsx";
+
+// ── 3D-world stage helpers: one room per top-level pipeline stage ────────────
+function stageLabel(node) {
+  switch (node.type) {
+    case "terminal": return (node.argv || []).join(" ") || "terminal";
+    case "batch": return "Batch";
+    case "fanout":
+    case "dynamic_batch": return "Fan-out";
+    case "agent": return "Agent";
+    case "iteration": return "Loop";
+    case "sequence": return "Sequence";
+    default: return node.type || "node";
+  }
+}
+function _collectIds(n, acc) {
+  if (!n) return;
+  acc.push(n.id);
+  (n.nodes || []).forEach((c) => _collectIds(c, acc));
+  if (n.body) _collectIds(n.body, acc);
+}
+/** Aggregate a stage's status from itself + descendants (error > waiting > running). */
+function stageStatus(node, statusById) {
+  const ids = [];
+  _collectIds(node, ids);
+  const sts = ids.map((id) => statusById[id]).filter(Boolean);
+  if (!sts.length) return statusById[node.id] || "pending";
+  if (sts.includes("error")) return "error";
+  if (sts.includes("waiting")) return "waiting";
+  if (sts.includes("running")) return "running";
+  if (sts.every((s) => s === "finished")) return "finished";
+  return "running";
+}
 
 function decodeOne(result) {
   if (!result?.output) return "";
@@ -35,6 +68,13 @@ export default function PipelineDashboard({ workspace, tabs }) {
   // Backend for this run's pipeline-node sessions: "bare" (plain PTY, "Default")
   // or "tmux". Per-panel, so each workspace remembers its own choice.
   const [backend, setBackend] = useState("bare");
+  // Experimental 3D "world" view of the live tree (per panel). `world` toggles
+  // visibility; `worldMounted` keeps the (heavy, WebGL) scene mounted once opened
+  // so the camera position persists between toggles — but never spins up a context
+  // for a panel you never open it on.
+  const [world, setWorld] = useState(false);
+  const [worldMounted, setWorldMounted] = useState(false);
+  const toggleWorld = () => setWorld((w) => { if (!w) setWorldMounted(true); return !w; });
 
   // This panel renders exactly one workspace. App keeps every workspace's panel
   // mounted (hiding inactive via display:none) so node terminals are never
@@ -53,6 +93,12 @@ export default function PipelineDashboard({ workspace, tabs }) {
       return null;
     }
   }, [active?.id, active?.dsl]);
+
+  // One 3D room per top-level pipeline stage, with its aggregated live status.
+  const stages = useMemo(() => {
+    const nodes = active?.spec?.nodes || [];
+    return nodes.map((n) => ({ id: n.id, label: stageLabel(n), status: stageStatus(n, active.statusById || {}) }));
+  }, [active?.spec, active?.statusById]);
 
   // Node-card tab id, namespaced per workspace (matches terminalController).
   const nt = (nodeId) => (active ? `${active.id}::node-${nodeId}` : null);
@@ -342,20 +388,35 @@ export default function PipelineDashboard({ workspace, tabs }) {
               <span className="pipeline-title">{active.name}</span>
               <span className={`status-pill status-${active.status}`}>{active.status}</span>
               {running && <button className="btn-cancel" onClick={() => cancelWorkspace(active.id)}>Cancel</button>}
+              <button className="btn-world" onClick={toggleWorld} title="Experimental 3D view">
+                {world ? "▣ Pipeline" : "◷ World"}
+              </button>
             </div>
-            {active.warnings?.length > 0 && (
-              <div className="pipeline-warnings">
-                {active.warnings.map((w, i) => <div key={i} className="warn-line">⚠ {w}</div>)}
-              </div>
-            )}
-            {active.status === "error" && active.error && (
-              <div className="pipeline-error-banner">✕ {active.error}</div>
-            )}
-            <div className="live-tree">{renderLiveNodeTree(active.spec)}</div>
-            {active.result && (
-              <div className="pipeline-result">
-                <div className="result-label">Final Output</div>
-                <pre className="result-data">{decodeResult(active.result)}</pre>
+            {/* Keep the live tree MOUNTED (just hidden) when in world view, so
+                node terminals aren't disposed and re-attached (which replays the
+                raw PTY buffer and corrupts interactive TUIs). WorldView, by
+                contrast, only mounts while shown — its render loop shouldn't run
+                hidden, and it rebuilds cheaply. */}
+            <div style={{ display: world ? "none" : "block" }}>
+              {active.warnings?.length > 0 && (
+                <div className="pipeline-warnings">
+                  {active.warnings.map((w, i) => <div key={i} className="warn-line">⚠ {w}</div>)}
+                </div>
+              )}
+              {active.status === "error" && active.error && (
+                <div className="pipeline-error-banner">✕ {active.error}</div>
+              )}
+              <div className="live-tree">{renderLiveNodeTree(active.spec)}</div>
+              {active.result && (
+                <div className="pipeline-result">
+                  <div className="result-label">Final Output</div>
+                  <pre className="result-data">{decodeResult(active.result)}</pre>
+                </div>
+              )}
+            </div>
+            {worldMounted && (
+              <div style={{ display: world ? "block" : "none" }}>
+                <WorldView stages={stages} workspaceId={active.id} />
               </div>
             )}
           </div>

@@ -1,12 +1,13 @@
 import React, { useState, useEffect } from "react";
-import { createWorkspace, selectWorkspace, clearCloseBlocked } from "../terminalController.js";
+import { createWorkspace, selectWorkspace, clearCloseBlocked, openNewWorkspace, closeNewWorkspace } from "../terminalController.js";
 import NewWorkspaceModal from "./NewWorkspaceModal.jsx";
 import CloseWorkspaceModal from "./CloseWorkspaceModal.jsx";
 
 /** Tabs for workspaces. Each runs a pipeline independently/concurrently; selecting
- *  one shows its dashboard. "+" opens the create modal; × opens the close dialog. */
-export default function WorkspaceTabBar({ workspaces, activeWorkspaceId, kinds, closeBlocked }) {
-  const [creating, setCreating] = useState(false);
+ *  one shows its dashboard. "+" opens the create modal; × opens the close dialog.
+ *  The create modal's open state lives in the controller (newWorkspace) so a
+ *  deep-link / PR action can open it pre-filled too. */
+export default function WorkspaceTabBar({ workspaces, activeWorkspaceId, kinds, closeBlocked, newWorkspace }) {
   const [closingId, setClosingId] = useState(null);
 
   const closing = workspaces.find((w) => w.id === closingId) || null;
@@ -37,13 +38,14 @@ export default function WorkspaceTabBar({ workspaces, activeWorkspaceId, kinds, 
           >×</button>
         </div>
       ))}
-      <button className="ws-new" onClick={() => setCreating(true)} title="New workspace">+</button>
+      <button className="ws-new" onClick={() => openNewWorkspace()} title="New workspace">+</button>
 
-      {creating && (
+      {newWorkspace && (
         <NewWorkspaceModal
           kinds={kinds}
-          onClose={() => setCreating(false)}
-          onCreate={(kind, fields) => { createWorkspace(kind, fields); setCreating(false); }}
+          initial={newWorkspace}
+          onClose={closeNewWorkspace}
+          onCreate={(kind, fields) => { createWorkspace(kind, fields); closeNewWorkspace(); }}
         />
       )}
 

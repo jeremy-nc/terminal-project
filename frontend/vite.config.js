@@ -14,6 +14,8 @@ export default defineConfig({
         target: "ws://127.0.0.1:8000",
         ws: true,
       },
+      // Slack OAuth start/callback are handled by the Python backend.
+      "/slack": { target: "http://127.0.0.1:8000" },
     },
   },
   build: {

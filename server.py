@@ -23,6 +23,7 @@ import base64
 import json
 import os
 import re
+import secrets
 from typing import Any
 from contextlib import asynccontextmanager
 
@@ -34,7 +35,7 @@ load_dotenv()
 
 import uvicorn
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from terminal import (
@@ -44,11 +45,13 @@ from terminal import (
 from terminal.workspace_kinds import get_kind, kinds_manifest, WorkspaceError
 from github.pulls import fetch_my_pulls, GitHubAuthError
 from repos import RepoIndex
+from slack import SlackService
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "frontend", "dist")
 WORKSPACES_FILE = os.path.join(HERE, "workspaces.json")
 REPOS_FILE = os.path.join(HERE, "repos.json")
+SLACK_FILE = os.path.join(HERE, "slack.json")
 
 
 def b64(data: bytes) -> str:
@@ -121,6 +124,7 @@ class Hub:
 manager = SessionManager()
 workspaces = WorkspaceStore(WORKSPACES_FILE)
 repo_index = RepoIndex(REPOS_FILE)  # local owner/name -> path map (scanned at startup)
+slack_service = SlackService(SLACK_FILE)  # Slack client (token from slack.json / SLACK_TOKEN)
 hub = Hub()
 
 # Shared interactive-terminal registry (the Terminal-view tabs), mirrored to all
@@ -146,6 +150,12 @@ def _repos_event() -> dict:
     map. Broadcast so every window can resolve a PR to its local checkout and
     show/edit the roots near the connection indicator."""
     return {"type": "repos", **repo_index.to_json()}
+
+
+def _slack_event() -> dict:
+    """Slack connection state for the client: {configured, channels}. Never carries
+    the token. Broadcast so every window's Slack tab reflects the current state."""
+    return {"type": "slack", **slack_service.to_json()}
 
 
 def _workspace_list_event(created: str = None) -> dict:
@@ -181,6 +191,25 @@ async def _poll_pulls():
             print(f"[pulls] poll error: {e}", flush=True)
 
 
+SLACK_POLL_INTERVAL = 12  # seconds — refresh each watched Slack channel
+
+
+async def _poll_slack():
+    """Poll each watched Slack channel on an interval and broadcast its latest
+    messages to every window, so a selected channel updates in near-real-time.
+    Paused when no windows are connected, no token, or nothing is watched."""
+    while True:
+        await asyncio.sleep(SLACK_POLL_INTERVAL)
+        if hub.empty() or not slack_service.configured():
+            continue
+        for ch in slack_service.polled():
+            try:
+                msgs = await asyncio.to_thread(slack_service.channel_messages, ch, 30)
+                hub.send({"type": "slack_messages", "channel": ch, "messages": msgs})
+            except Exception as e:   # never let one channel kill the loop
+                print(f"[slack] poll {ch}: {e}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     manager.loop = asyncio.get_running_loop()
@@ -188,8 +217,10 @@ async def lifespan(app: FastAPI):
     # current tmux.conf (tmux only reads its config when the server starts).
     manager.reset_backend()
     pulls_task = asyncio.create_task(_poll_pulls())
+    slack_task = asyncio.create_task(_poll_slack())
     yield
     pulls_task.cancel()
+    slack_task.cancel()
     manager.shutdown_all()
 
 
@@ -217,6 +248,42 @@ async def spa_route(rest: str):
         os.path.join(DIST, "index.html"),
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
+
+
+# ── Slack OAuth "Add to Slack" flow ──────────────────────────────────────────
+# Open /slack/oauth/start (in a popup) -> Slack consent -> Slack redirects to
+# /slack/oauth/callback?code=… -> we exchange it for a user token and the app's
+# Slack tab flips to connected via the WS broadcast. State is a CSRF nonce; the
+# redirect URI is the one configured in the Slack tab (must match the app's
+# registered Redirect URL exactly). Single-user local tool, so one in-flight state.
+_slack_oauth_state = None
+
+
+@app.get("/slack/oauth/start")
+async def slack_oauth_start():
+    global _slack_oauth_state
+    if not slack_service.has_app():
+        return HTMLResponse("<h3>Slack OAuth isn't configured</h3>"
+                            "<p>Enter your Client ID, Client Secret and redirect URL in the Slack tab first.</p>",
+                            status_code=400)
+    _slack_oauth_state = secrets.token_urlsafe(16)
+    return RedirectResponse(slack_service.authorize_url(_slack_oauth_state))
+
+
+@app.get("/slack/oauth/callback")
+async def slack_oauth_callback(code: str = "", state: str = "", error: str = ""):
+    if error:
+        return HTMLResponse(f"<h3>Slack authorization was declined</h3><p>{error}</p>")
+    if not code or not _slack_oauth_state or state != _slack_oauth_state:
+        return HTMLResponse("<h3>Invalid OAuth response</h3>"
+                            "<p>State mismatch or missing code — start again from the Slack tab.</p>",
+                            status_code=400)
+    res = await asyncio.to_thread(slack_service.oauth_exchange, code)
+    if res.get("ok"):
+        hub.send(_slack_event())   # the app's Slack tab flips to connected
+        return HTMLResponse("<h3>✅ Slack connected</h3>"
+                            "<p>You can close this tab and return to the app.</p>")
+    return HTMLResponse(f"<h3>Slack connection failed</h3><p>{res.get('error')}</p>", status_code=400)
 
 
 # Serve the Vite-built assets (JS chunks, CSS, etc.) from /assets/
@@ -409,6 +476,7 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         sub.send(_terminal_list_event())
         sub.send(_workspace_list_event())
         sub.send(_repos_event())
+        sub.send(_slack_event())
         for ws in workspaces.list():
             run = ws.run
             if run and run.task and not run.task.done():
@@ -541,6 +609,66 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             except GitHubAuthError as e:
                 sub.send({"type": "prs", "prs": [], "error": str(e)})
         asyncio.create_task(_list_prs())
+        return
+
+    # ── slack domain (read channels/messages/mentions, post a message) ────────
+    # WebClient is blocking, so every call runs via asyncio.to_thread.
+    if mtype == "set_slack_token":
+        async def _set_token():
+            await asyncio.to_thread(
+                slack_service.set_token, msg.get("token") or "", msg.get("cookie") or "")
+            hub.send(_slack_event())   # configured + channels — never the token/cookie
+        asyncio.create_task(_set_token())
+        return
+
+    if mtype == "set_slack_app":
+        # Store OAuth app creds (Client ID/Secret + redirect URI) for the
+        # "Add to Slack" flow. The secret stays server-side (gitignored slack.json).
+        async def _set_app():
+            await asyncio.to_thread(
+                slack_service.set_app, msg.get("client_id") or "",
+                msg.get("client_secret") or "", msg.get("redirect_uri") or "")
+            hub.send(_slack_event())
+        asyncio.create_task(_set_app())
+        return
+
+    if mtype == "set_slack_polled":
+        # Channels the background poller watches for new messages. Persisted +
+        # broadcast (so every window's selection stays in sync).
+        async def _set_polled():
+            await asyncio.to_thread(slack_service.set_polled, msg.get("channels") or [])
+            hub.send(_slack_event())
+        asyncio.create_task(_set_polled())
+        return
+
+    if mtype == "refresh_slack":
+        async def _refresh_slack():
+            await asyncio.to_thread(slack_service.refresh)
+            hub.send(_slack_event())
+        asyncio.create_task(_refresh_slack())
+        return
+
+    if mtype == "slack_channel_messages":
+        async def _slack_history():
+            msgs = await asyncio.to_thread(
+                slack_service.channel_messages, msg.get("channel"), int(msg.get("limit", 30)))
+            sub.send({"type": "slack_messages", "channel": msg.get("channel"), "messages": msgs})
+        asyncio.create_task(_slack_history())
+        return
+
+    if mtype == "slack_mentions":
+        async def _slack_mentions():
+            items = await asyncio.to_thread(slack_service.my_mentions)
+            sub.send({"type": "slack_mentions", "mentions": items})
+        asyncio.create_task(_slack_mentions())
+        return
+
+    if mtype == "slack_send":
+        async def _slack_send():
+            res = await asyncio.to_thread(
+                slack_service.post_message, msg.get("channel"), msg.get("text") or "")
+            sub.send({"type": "slack_sent", "channel": msg.get("channel"), **res})
+        asyncio.create_task(_slack_send())
         return
 
     sess = manager.sessions.get(msg.get("id"))

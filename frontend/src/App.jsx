@@ -14,11 +14,12 @@ import PipelineDashboard from "./components/PipelineDashboard.jsx";
 import WorkspaceTabBar from "./components/WorkspaceTabBar.jsx";
 import SharedNodeView from "./components/SharedNodeView.jsx";
 import PullRequestsDashboard from "./components/PullRequestsDashboard.jsx";
+import SlackDashboard from "./components/SlackDashboard.jsx";
 
 export default function App() {
   const { status, tabs, activeTabId, workspaces, activeWorkspaceId, kinds, closeBlocked, toasts,
           prs, prsViewer, prsLoading, prsError, prsUpdatedAt, appFx,
-          repos, repoRoots, newWorkspace } = useSyncExternalStore(subscribe, getSnapshot);
+          repos, repoRoots, slack, slackMessages, slackMentions, newWorkspace } = useSyncExternalStore(subscribe, getSnapshot);
   // A shared deep-link (/shared/workspace/{wid}/t/{nodeId}) just selects the
   // Share view with this target; no separate page.
   const shareTarget = useMemo(() => {
@@ -123,6 +124,12 @@ export default function App() {
             Pull Requests
             {reviewCount > 0 && <span className="toggle-badge">{reviewCount}</span>}
           </button>
+          <button
+            className={`toggle-btn ${view === "slack" ? "active" : ""}`}
+            onClick={() => setView("slack")}
+          >
+            Slack
+          </button>
         </div>
 
         <button onClick={() => activeTabId && restartTab(activeTabId)}>
@@ -199,6 +206,13 @@ export default function App() {
             localRepos={localRepos}
             onWorkOn={onWorkOnPr}
           />
+        </div>
+
+        <div
+          className="slack-view-wrap"
+          style={{ display: view === "slack" ? "flex" : "none" }}
+        >
+          <SlackDashboard slack={slack} messages={slackMessages} mentions={slackMentions} />
         </div>
 
         <div

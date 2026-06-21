@@ -24,3 +24,7 @@ frontend/dist/
 nohup.out
 /tmp/
 workspaces.json
+
+# local secrets / machine-specific state (never commit)
+slack.json
+repos.json

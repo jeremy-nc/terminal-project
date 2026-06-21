@@ -48,6 +48,12 @@ let _state = {
   // connect; drives the repos dropdown and resolving a PR to its local checkout.
   repos: [],
   repoRoots: [],
+  // slack domain: connection state + channel list (the token lives server-side
+  // only — never sent to the client). slackMessages/slackMentions hold the latest
+  // fetch for the Slack tab.
+  slack: { configured: false, channels: [], polled: [] },
+  slackMessages: {},   // channel id -> recent messages (open-channel load + poller)
+  slackMentions: [],
   // Active whole-app animations: [{ type, key }]. Several can run at once so a
   // view/action can fire a combination of effects. <AppFx/> renders each.
   appFx: [],
@@ -286,6 +292,22 @@ function _handleMsg(msg) {
     }
     case "repos": {
       _setState({ repos: msg.repos || [], repoRoots: msg.roots || [] });
+      break;
+    }
+    case "slack": {
+      _setState({ slack: { configured: !!msg.configured, channels: msg.channels || [], polled: msg.polled || [] } });
+      break;
+    }
+    case "slack_messages": {
+      _setState({ slackMessages: { ..._state.slackMessages, [msg.channel]: msg.messages || [] } });
+      break;
+    }
+    case "slack_mentions": {
+      _setState({ slackMentions: msg.mentions || [] });
+      break;
+    }
+    case "slack_sent": {
+      if (!msg.ok) _pushToast(`Slack: ${msg.error || "send failed"}`);
       break;
     }
     case "prs": {
@@ -648,6 +670,38 @@ export function listPrs() {
     _setState({ prsLoading: true });
     _send({ type: "list_prs" });
   }
+}
+
+// ── slack ────────────────────────────────────────────────────────────────────
+/** Set the Slack token (bot xoxb- or user xoxp-). Stored server-side only;
+ *  the broadcast back carries just {configured, channels}, never the token. */
+export function setSlackToken(token, cookie = "") {
+  _send({ type: "set_slack_token", token, cookie });
+}
+/** Store OAuth app creds for the "Add to Slack" flow (Client ID/Secret + the
+ *  redirect URL registered in the Slack app). */
+export function setSlackApp(clientId, clientSecret, redirectUri) {
+  _send({ type: "set_slack_app", client_id: clientId, client_secret: clientSecret, redirect_uri: redirectUri });
+}
+/** Set the channels the backend poller watches for real-time updates. */
+export function setSlackPolled(channels) {
+  _send({ type: "set_slack_polled", channels });
+}
+/** Re-fetch the channel list. */
+export function refreshSlack() {
+  _send({ type: "refresh_slack" });
+}
+/** Load a channel's recent messages (-> slack_messages state). */
+export function loadSlackMessages(channel, limit = 30) {
+  if (channel) _send({ type: "slack_channel_messages", channel, limit });
+}
+/** Load your recent mentions (needs a user token with search:read). */
+export function loadSlackMentions() {
+  _send({ type: "slack_mentions" });
+}
+/** Post a message to a channel. */
+export function sendSlackMessage(channel, text) {
+  if (channel && (text || "").trim()) _send({ type: "slack_send", channel, text });
 }
 
 export function selectWorkspace(wid) {

@@ -377,7 +377,7 @@ export default function PipelineDashboard({ workspace, tabs }) {
         )}
       </div>
 
-      <div className="pipeline-main">
+      <div className={`pipeline-main${world ? " world-on" : ""}`}>
         {!active ? (
           <div className="preview-view">
             <div className="pipeline-header"><span className="pipeline-title">No session</span></div>
@@ -392,12 +392,18 @@ export default function PipelineDashboard({ workspace, tabs }) {
                 {world ? "▣ Pipeline" : "◷ World"}
               </button>
             </div>
-            {/* Keep the live tree MOUNTED (just hidden) when in world view, so
-                node terminals aren't disposed and re-attached (which replays the
-                raw PTY buffer and corrupts interactive TUIs). WorldView, by
-                contrast, only mounts while shown — its render loop shouldn't run
-                hidden, and it rebuilds cheaply. */}
-            <div style={{ display: world ? "none" : "block" }}>
+            {/* Live tree stays MOUNTED and rendered at all times — never
+                display:none. That avoids disposing/re-attaching node terminals
+                (which replays the raw PTY buffer and corrupts interactive TUIs)
+                AND keeps each terminal's scroll viewport alive (a display:none
+                xterm can't scroll). In world view we park it OFF-SCREEN with
+                position:FIXED — fixed (not absolute) so its containing block is
+                the viewport, meaning the tall tree does NOT add to .pipeline-main's
+                scroll height (absolute would, leaving the page scrollable behind
+                the 3D canvas). WorldView then takes its place in normal flow. */}
+            <div style={world
+              ? { position: "fixed", left: "-99999px", top: 0, width: "100%" }
+              : undefined}>
               {active.warnings?.length > 0 && (
                 <div className="pipeline-warnings">
                   {active.warnings.map((w, i) => <div key={i} className="warn-line">⚠ {w}</div>)}

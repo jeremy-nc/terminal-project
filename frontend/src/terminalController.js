@@ -850,14 +850,16 @@ function cellColor(cell, bg) {
 
 /** Read a node terminal's visible grid as styled runs for the 3D screen mirror.
  *  Each row is an array of {t, fg, bg, bold} spans (fg/bg = CSS colour or null
- *  for the terminal default). Colour comes straight from xterm's cell buffer. */
+ *  for the terminal default). Colour comes straight from xterm's cell buffer.
+ *  Reads from the current viewport top so the mirror follows the scrollback. */
 export function readNodeScreen(tabId) {
   const term = _terms.get(tabId)?.main;
   if (!term) return null;
   const buf = term.buffer.active;
+  const top = buf.viewportY;          // current viewport top (follows scrollback)
   const rows = [];
   for (let y = 0; y < term.rows; y++) {
-    const line = buf.getLine(buf.baseY + y);
+    const line = buf.getLine(top + y);
     const spans = [];
     if (line) {
       let cur = null;
@@ -876,7 +878,19 @@ export function readNodeScreen(tabId) {
     }
     rows.push(spans);
   }
-  return { rows, cols: term.cols, cursorX: buf.cursorX, cursorY: buf.cursorY };
+  return { rows, cols: term.cols, cursorX: buf.cursorX, cursorY: buf.cursorY + (buf.baseY - top) };
+}
+
+/** Scroll a node terminal by forwarding a wheel delta to its native scroll element
+ *  (.xterm-viewport) — the same path the on-screen pipeline view uses. The terminal
+ *  must be RENDERED (the WorldView overlay keeps it on-screen behind the modal) for
+ *  the viewport to have scroll height; falls back to scrollLines otherwise. */
+export function scrollNodeTerminal(tabId, deltaY) {
+  const term = _terms.get(tabId)?.main;
+  if (!term || !deltaY) return;
+  const vp = term.element?.querySelector(".xterm-viewport");
+  if (vp) vp.dispatchEvent(new WheelEvent("wheel", { deltaY, bubbles: true, cancelable: true }));
+  else term.scrollLines(Math.sign(deltaY) * Math.max(1, Math.round(Math.abs(deltaY) / 40)));
 }
 
 /** Route raw bytes to a node terminal's PTY — the same path the live xterm's

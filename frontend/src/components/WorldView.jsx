@@ -4,7 +4,7 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
-import { readNodeScreen, sendTerminalInput } from "../terminalController.js";
+import { readNodeScreen, sendTerminalInput, scrollNodeTerminal } from "../terminalController.js";
 
 // Paint a node terminal's styled rows onto a room screen's canvas. Each row is a
 // list of {t, fg, bg, bold} spans (from readNodeScreen) carrying real terminal
@@ -838,8 +838,16 @@ export default function WorldView({ stages, workspaceId }) {
       if (document.pointerLockElement === canvas) { tryEnterFromCenter(); return; }
       canvas.requestPointerLock();
     };
+    // Typing mode: forward the raw wheel delta to the live node terminal's native
+    // scroll DOM, so its scrollback moves and WorldView mirrors the new position.
+    const onWheel = (e) => {
+      if (!typingRef.current) return;
+      e.preventDefault();
+      scrollNodeTerminal(typingRef.current, e.deltaY);
+    };
     const onLockChange = () => { locked = document.pointerLockElement === canvas; };
     canvas.addEventListener("click", onClick);
+    canvas.addEventListener("wheel", onWheel, { passive: false });
     document.addEventListener("pointerlockchange", onLockChange);
     document.addEventListener("mousemove", onMouseMove);
     window.addEventListener("keydown", onKeyDown);
@@ -955,6 +963,7 @@ export default function WorldView({ stages, workspaceId }) {
       cancelAnimationFrame(raf);
       ro.disconnect();
       canvas.removeEventListener("click", onClick);
+      canvas.removeEventListener("wheel", onWheel);
       document.removeEventListener("pointerlockchange", onLockChange);
       document.removeEventListener("mousemove", onMouseMove);
       window.removeEventListener("keydown", onKeyDown);
@@ -998,7 +1007,7 @@ export default function WorldView({ stages, workspaceId }) {
       {typing ? (
         <div className="world-typing-bar">
           <span className="dot" />
-          <span className="wt-label"><b>{typing.label}</b> · typing to terminal</span>
+          <span className="wt-label">Typing…</span>
           <button onClick={exitTyping}>✕ Shift-Esc</button>
         </div>
       ) : (

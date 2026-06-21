@@ -202,7 +202,7 @@ async def _poll_slack():
         await asyncio.sleep(SLACK_POLL_INTERVAL)
         if hub.empty() or not slack_service.configured():
             continue
-        for ch in slack_service.polled():
+        for ch in slack_service.poll_set():   # pinned + every multiplexer's channels
             try:
                 msgs = await asyncio.to_thread(slack_service.channel_messages, ch, 30)
                 hub.send({"type": "slack_messages", "channel": ch, "messages": msgs})
@@ -639,6 +639,16 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             await asyncio.to_thread(slack_service.set_polled, msg.get("channels") or [])
             hub.send(_slack_event())
         asyncio.create_task(_set_polled())
+        return
+
+    if mtype == "set_slack_multiplexers":
+        # Read-only merge views [{id, name, channels}]. The frontend does the
+        # merging; the server just persists the definitions and folds their
+        # channels into the poll set so they stay subscribed.
+        async def _set_mux():
+            await asyncio.to_thread(slack_service.set_multiplexers, msg.get("multiplexers") or [])
+            hub.send(_slack_event())
+        asyncio.create_task(_set_mux())
         return
 
     if mtype == "refresh_slack":

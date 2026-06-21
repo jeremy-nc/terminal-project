@@ -1576,3 +1576,29 @@ html, body { background: var(--bg); }
 .slack-chan-row[draggable] { cursor: grab; }
 
 .slack-msg-time { font-size: 10.5px; color: var(--text-faint, #6a6a73); font-weight: 400; margin-left: 4px; }
+
+/* Slack multiplexers (sidebar section + merged read-only view) */
+.slack-side-sub { display: flex; align-items: center; justify-content: space-between; padding: 12px 14px 6px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-muted, #9a9aa3); }
+.slack-mux-list { padding: 0 6px 8px; max-height: 32vh; overflow-y: auto; }
+.slack-mux-empty { color: var(--text-faint, #6a6a73); font-size: 11.5px; padding: 4px 10px 8px; }
+.slack-mux-count { margin-left: auto; padding-left: 8px; font-size: 10.5px; color: var(--text-faint, #6a6a73); }
+.slack-mux-list .slack-chan { display: flex; align-items: center; }
+
+.slack-mux-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 8px 16px; border-bottom: 1px solid var(--border, #2a2a3a); }
+.slack-mux-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 4px 3px 8px; border-radius: 999px; background: var(--surface-2, #161619); border: 1px solid var(--border, #2a2a3a); font-size: 11.5px; }
+.slack-mux-chip button { background: none; border: none; color: var(--text-faint, #6a6a73); cursor: pointer; font-size: 13px; line-height: 1; padding: 0 2px; }
+.slack-mux-chip button:hover { color: var(--text, #ededef); }
+.slack-mux-chip-hint { font-size: 11px; color: var(--text-faint, #6a6a73); }
+
+.slack-mux { flex: 1; overflow-y: auto; padding: 8px 0 14px; }
+.slack-mux-bucket-head { position: sticky; top: 0; z-index: 1; background: var(--bg, #0e0e10); padding: 8px 18px; font-size: 11px; font-weight: 600; letter-spacing: 0.03em; color: var(--text-muted, #9a9aa3); border-bottom: 1px solid var(--border, #2a2a3a); }
+.slack-mux-msg { padding: 6px 18px; }
+.slack-mux-chan { font-size: 12px; font-weight: 600; color: var(--accent-hover, #8f82ff); margin-top: 8px; }
+
+.slack-mux-rename-btn { background: none; border: none; color: var(--text-faint, #6a6a73); cursor: pointer; font-size: 13px; margin-left: 8px; padding: 2px 4px; border-radius: 4px; }
+.slack-mux-rename-btn:hover { color: var(--accent-hover, #8f82ff); background: rgba(255,255,255,0.06); }
+.slack-mux-rename { font: inherit; font-size: 15px; font-weight: 600; background: var(--bg, #0e0e10); border: 1px solid var(--accent, #7c6cff); border-radius: 6px; color: var(--text, #ededef); padding: 2px 8px; min-width: 180px; }
+.slack-mux-rename:focus { outline: none; }
+
+.slack-watch.mux { color: var(--success, #4ec9b0); opacity: 0.45; }
+.slack-watch.mux:hover { opacity: 0.9; }

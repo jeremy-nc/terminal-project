@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { setSlackToken, setSlackApp, setSlackPolled, refreshSlack, loadSlackMessages, loadSlackMentions, sendSlackMessage } from "../terminalController.js";
+import { setSlackToken, setSlackApp, setSlackPolled, setSlackMultiplexers, refreshSlack, loadSlackMessages, loadSlackMentions, sendSlackMessage } from "../terminalController.js";
 
 /** Format a Slack ts ("1718800000.123456") as a short local time — just the time
  *  for today, date + time for older messages. */
@@ -56,6 +56,67 @@ function SlackMessages({ channel, items, selfPoll = true }) {
   );
 }
 
+/** Label an hour bucket: "19 Jun · 10:00 AM – 11:00 AM". */
+function fmtBucket(start) {
+  const end = new Date(start.getTime() + 3600000);
+  const t = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return `${start.toLocaleDateString([], { day: "numeric", month: "short" })} · ${t(start)} – ${t(end)}`;
+}
+
+/** Read-only multiplexer: merges its channels' messages (from the polled map),
+ *  sorts by time, and groups into hourly buckets — a #channel sub-label shows
+ *  whenever the source changes. All merging is client-side. */
+function SlackMultiplexer({ mux, channels, messages }) {
+  const ref = useRef(null);
+  const byId = (id) => channels.find((c) => c.id === id) || null;
+
+  const merged = [];
+  for (const cid of mux.channels || []) for (const m of messages[cid] || []) merged.push({ ...m, channel: cid });
+  merged.sort((a, b) => parseFloat(a.ts) - parseFloat(b.ts));
+
+  const buckets = [];
+  let cur = null;
+  for (const m of merged) {
+    const d = new Date(parseFloat(m.ts) * 1000);
+    const key = `${d.toDateString()} ${d.getHours()}`;
+    if (!cur || cur.key !== key) {
+      const start = new Date(d); start.setMinutes(0, 0, 0);
+      cur = { key, start, msgs: [] };
+      buckets.push(cur);
+    }
+    cur.msgs.push(m);
+  }
+
+  useLayoutEffect(() => { const el = ref.current; if (el) el.scrollTop = el.scrollHeight; }, [merged.length]);
+
+  if (!(mux.channels || []).length)
+    return <div className="slack-empty slack-empty-center">Drag channels onto this multiplexer (sidebar or the bar above) to combine them.</div>;
+
+  return (
+    <div className="slack-mux" ref={ref}>
+      {buckets.length === 0
+        ? <div className="slack-empty">No messages yet — give the poller a moment.</div>
+        : buckets.map((b) => (
+          <div className="slack-mux-bucket" key={b.key}>
+            <div className="slack-mux-bucket-head">{fmtBucket(b.start)}</div>
+            {b.msgs.map((m, i) => {
+              const prev = b.msgs[i - 1];
+              const showChan = !prev || prev.channel !== m.channel;
+              const c = byId(m.channel);
+              return (
+                <div className="slack-mux-msg" key={`${m.ts}-${m.channel}-${i}`}>
+                  {showChan && <div className="slack-mux-chan">{c?.is_im ? "@" : "#"}{c?.name || m.channel}</div>}
+                  <div className="slack-msg-meta"><b>{m.user || "?"}</b> <span className="slack-msg-time">{fmtTs(m.ts)}</span></div>
+                  <div className="slack-msg-text">{m.text}</div>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+    </div>
+  );
+}
+
 /** A pinned mini chat window (right panel) for a watched channel — read + post.
  *  Its channel is in the backend poller's set, so it updates without self-polling. */
 function SlackPin({ channel, name, isPrivate, isIm, items, onClose }) {
@@ -89,6 +150,9 @@ export default function SlackDashboard({ slack, messages, mentions }) {
   const [clientSecret, setClientSecret] = useState("");
   const [selected, setSelected] = useState(null);   // channel id
   const [showMentions, setShowMentions] = useState(false);
+  const [selectedMux, setSelectedMux] = useState(null);
+  const [editingMux, setEditingMux] = useState(false);
+  const [nameDraft, setNameDraft] = useState("");
   const [draft, setDraft] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const prevLatest = useRef({});                 // channel id -> last-seen latest ts
@@ -205,18 +269,62 @@ export default function SlackDashboard({ slack, messages, mentions }) {
   const selChannel = slack.channels.find((c) => c.id === selected) || null;
   const items = messages[selected] || [];
   const polled = slack.polled || [];
+  const muxes = slack.multiplexers || [];
+  const muxObj = muxes.find((m) => m.id === selectedMux) || null;
   const pickChannel = (id) => {
-    setShowMentions(false); setSelected(id);
+    setShowMentions(false); setSelectedMux(null); setEditingMux(false); setSelected(id);
     setUnread((u) => { const n = { ...u }; delete n[id]; return n; });   // clear its dot
     loadSlackMessages(id);
   };
-  const openMentions = () => { setShowMentions(true); setSelected(null); loadSlackMentions(); };
+  const openMentions = () => { setShowMentions(true); setSelectedMux(null); setEditingMux(false); setSelected(null); loadSlackMentions(); };
   const send = () => { if (selected && draft.trim()) { sendSlackMessage(selected, draft.trim()); setDraft(""); } };
-  const toggleWatch = (id) => setSlackPolled(polled.includes(id) ? polled.filter((x) => x !== id) : [...polled, id]);
+  const toggleWatch = (id) => {
+    const adding = !polled.includes(id);
+    setSlackPolled(adding ? [...polled, id] : polled.filter((x) => x !== id));
+    if (adding) loadSlackMessages(id);   // populate now, don't wait for the next poll
+  };
+  // ── multiplexers (read-only merge views; channels join the poll set server-side)
+  const selectMux = (id) => { setSelectedMux(id); setSelected(null); setShowMentions(false); setEditingMux(false); };
+  const renameMux = (id, name) => {
+    setSlackMultiplexers(muxes.map((m) => m.id === id ? { ...m, name: (name || "").trim() || m.name } : m));
+    setEditingMux(false);
+  };
+  const createMux = () => {
+    const id = `mux-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+    setSlackMultiplexers([...muxes, { id, name: `Multiplexer ${muxes.length + 1}`, channels: [] }]);
+    selectMux(id);
+  };
+  const removeMux = (id) => { setSlackMultiplexers(muxes.filter((m) => m.id !== id)); if (selectedMux === id) setSelectedMux(null); };
+  const addToMux = (muxId, cid) => {
+    setSlackMultiplexers(muxes.map((m) =>
+      m.id === muxId ? { ...m, channels: m.channels.includes(cid) ? m.channels : [...m.channels, cid] } : m));
+    loadSlackMessages(cid);   // populate the merge view now, not on the next poll cycle
+  };
+  const removeFromMux = (muxId, cid) => setSlackMultiplexers(muxes.map((m) =>
+    m.id === muxId ? { ...m, channels: m.channels.filter((c) => c !== cid) } : m));
 
   return (
     <div className="slack-dash">
       <div className="slack-sidebar">
+        <div className="slack-side-sub">
+          <span>Multiplexers</span>
+          <button className="slack-refresh" title="New multiplexer" onClick={createMux}>+</button>
+        </div>
+        <div className="slack-mux-list">
+          {muxes.length === 0
+            ? <div className="slack-mux-empty">+ to create one, then drag channels in.</div>
+            : muxes.map((mx) => (
+              <div key={mx.id} className="slack-chan-row"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => { e.preventDefault(); const cid = e.dataTransfer.getData("text/slack-channel"); if (cid) addToMux(mx.id, cid); }}>
+                <button className={`slack-chan${selectedMux === mx.id ? " active" : ""}`} onClick={() => selectMux(mx.id)}>
+                  <span className="slack-chan-hash">▦</span>{mx.name}<span className="slack-mux-count">{(mx.channels || []).length}</span>
+                </button>
+                <button className="slack-watch" title="Delete multiplexer" onClick={() => removeMux(mx.id)}>×</button>
+              </div>
+            ))}
+        </div>
+
         <div className="slack-side-head">
           <span>Channels</span>
           <button className="slack-refresh" title="Reload channels" onClick={refreshSlack}>↻</button>
@@ -224,7 +332,12 @@ export default function SlackDashboard({ slack, messages, mentions }) {
         <button className={`slack-chan${showMentions ? " active" : ""}`} onClick={openMentions}>@ Mentions</button>
         <div className="slack-chan-list">
           {slack.channels.map((c) => {
-            const watched = polled.includes(c.id);
+            const pinned = polled.includes(c.id);
+            const inMux = muxes.some((m) => (m.channels || []).includes(c.id));
+            const dot = pinned ? " on" : inMux ? " mux" : "";
+            const title = pinned ? "Pinned & polling — click to unpin"
+              : inMux ? "Polled via a multiplexer — click to also pin it to the right panel"
+              : "Watch for real-time updates (pin to the right panel)";
             return (
               <div key={c.id} className="slack-chan-row" draggable
                 onDragStart={(e) => e.dataTransfer.setData("text/slack-channel", c.id)}>
@@ -232,11 +345,7 @@ export default function SlackDashboard({ slack, messages, mentions }) {
                   <span className="slack-chan-hash">{c.is_im ? "@" : c.is_private ? "🔒" : "#"}</span>{c.name}
                   {unread[c.id] && c.id !== selected && <span className="slack-unread" />}
                 </button>
-                <button
-                  className={`slack-watch${watched ? " on" : ""}`}
-                  title={watched ? "Watching — real-time updates on. Click to stop." : "Watch for real-time updates"}
-                  onClick={() => toggleWatch(c.id)}
-                >●</button>
+                <button className={`slack-watch${dot}`} title={title} onClick={() => toggleWatch(c.id)}>●</button>
               </div>
             );
           })}
@@ -244,7 +353,41 @@ export default function SlackDashboard({ slack, messages, mentions }) {
       </div>
 
       <div className="slack-main">
-        {showMentions ? (
+        {muxObj ? (
+          <>
+            <div className="slack-main-head">
+              <span className="slack-chan-hash">▦</span>
+              {editingMux ? (
+                <input
+                  className="slack-mux-rename" autoFocus value={nameDraft}
+                  onChange={(e) => setNameDraft(e.target.value)}
+                  onBlur={() => renameMux(muxObj.id, nameDraft)}
+                  onKeyDown={(e) => { if (e.key === "Enter") e.target.blur(); if (e.key === "Escape") setEditingMux(false); }}
+                  spellCheck={false}
+                />
+              ) : (
+                <>
+                  {muxObj.name}
+                  <button className="slack-mux-rename-btn" title="Rename" onClick={() => { setNameDraft(muxObj.name); setEditingMux(true); }}>✎</button>
+                </>
+              )}
+            </div>
+            <div className="slack-mux-chips"
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => { e.preventDefault(); const cid = e.dataTransfer.getData("text/slack-channel"); if (cid) addToMux(muxObj.id, cid); }}>
+              {(muxObj.channels || []).map((cid) => {
+                const c = slack.channels.find((x) => x.id === cid);
+                return (
+                  <span className="slack-mux-chip" key={cid}>{c?.is_im ? "@" : "#"}{c?.name || cid}
+                    <button onClick={() => removeFromMux(muxObj.id, cid)}>×</button>
+                  </span>
+                );
+              })}
+              <span className="slack-mux-chip-hint">drag channels here</span>
+            </div>
+            <SlackMultiplexer mux={muxObj} channels={slack.channels} messages={messages} />
+          </>
+        ) : showMentions ? (
           <>
             <div className="slack-main-head">Your mentions</div>
             <div className="slack-msgs">
@@ -285,7 +428,7 @@ export default function SlackDashboard({ slack, messages, mentions }) {
         onDrop={(e) => {
           e.preventDefault(); setDragOver(false);
           const id = e.dataTransfer.getData("text/slack-channel");
-          if (id && !polled.includes(id)) setSlackPolled([...polled, id]);
+          if (id && !polled.includes(id)) { setSlackPolled([...polled, id]); loadSlackMessages(id); }
         }}
       >
         {polled.length === 0

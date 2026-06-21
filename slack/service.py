@@ -45,6 +45,7 @@ class SlackService:
         self._client_secret = (os.environ.get("SLACK_CLIENT_SECRET") or "").strip()
         self._redirect_uri = (os.environ.get("SLACK_REDIRECT_URI") or "").strip()
         self._polled = []                  # channel ids the background poller watches
+        self._multiplexers = []            # [{id, name, channels:[ids]}] merged read-only views
         self._load()                       # env wins per-field; else slack.json
         self._client = self._make_client()
         self._channels = []                # cached: [{id, name, is_private}]
@@ -78,6 +79,7 @@ class SlackService:
         self._client_secret = self._client_secret or (d.get("client_secret") or "").strip()
         self._redirect_uri = self._redirect_uri or (d.get("redirect_uri") or "").strip()
         self._polled = d.get("polled") or self._polled
+        self._multiplexers = d.get("multiplexers") or self._multiplexers
 
     def _save(self):
         try:
@@ -85,7 +87,8 @@ class SlackService:
             with open(tmp, "w") as f:
                 json.dump({"token": self._token, "cookie": self._cookie,
                            "client_id": self._client_id, "client_secret": self._client_secret,
-                           "redirect_uri": self._redirect_uri, "polled": self._polled}, f)
+                           "redirect_uri": self._redirect_uri, "polled": self._polled,
+                           "multiplexers": self._multiplexers}, f)
             os.replace(tmp, self._config_path)
             try:
                 os.chmod(self._config_path, 0o600)   # secrets — owner read/write only
@@ -118,6 +121,29 @@ class SlackService:
 
     def polled(self):
         return list(self._polled)
+
+    def set_multiplexers(self, muxes):
+        """Persist the read-only merge views: [{id, name, channels:[ids]}]."""
+        out = []
+        for m in (muxes or []):
+            if not isinstance(m, dict) or not m.get("id"):
+                continue
+            out.append({"id": str(m["id"]), "name": str(m.get("name") or "Multiplexer"),
+                        "channels": [str(c) for c in (m.get("channels") or []) if c]})
+        self._multiplexers = out
+        self._save()
+        return self._multiplexers
+
+    def multiplexers(self):
+        return list(self._multiplexers)
+
+    def poll_set(self):
+        """Channels the poller should refresh: the pinned set PLUS every channel in
+        any multiplexer, deduped."""
+        s = set(self._polled)
+        for m in self._multiplexers:
+            s.update(m.get("channels") or [])
+        return list(s)
 
     # ── OAuth "Add to Slack" flow ────────────────────────────────────────────
     def set_app(self, client_id: str, client_secret: str, redirect_uri: str):
@@ -266,4 +292,5 @@ class SlackService:
     def to_json(self):
         """Broadcast shape — NEVER includes any secret."""
         return {"configured": self.configured(), "channels": self._channels,
-                "hasApp": self.has_app(), "polled": list(self._polled)}
+                "hasApp": self.has_app(), "polled": list(self._polled),
+                "multiplexers": list(self._multiplexers)}

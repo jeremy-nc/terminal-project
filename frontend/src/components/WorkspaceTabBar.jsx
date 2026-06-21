@@ -7,7 +7,7 @@ import CloseWorkspaceModal from "./CloseWorkspaceModal.jsx";
  *  one shows its dashboard. "+" opens the create modal; × opens the close dialog.
  *  The create modal's open state lives in the controller (newWorkspace) so a
  *  deep-link / PR action can open it pre-filled too. */
-export default function WorkspaceTabBar({ workspaces, activeWorkspaceId, kinds, closeBlocked, newWorkspace }) {
+export default function WorkspaceTabBar({ workspaces, activeWorkspaceId, kinds, closeBlocked, newWorkspace, repos }) {
   const [closingId, setClosingId] = useState(null);
 
   const closing = workspaces.find((w) => w.id === closingId) || null;
@@ -51,6 +51,7 @@ export default function WorkspaceTabBar({ workspaces, activeWorkspaceId, kinds, 
       {newWorkspace && (
         <NewWorkspaceModal
           kinds={kinds}
+          repos={repos}
           initial={newWorkspace}
           onClose={closeNewWorkspace}
           onCreate={(kind, fields) => { createWorkspace(kind, fields); closeNewWorkspace(); }}

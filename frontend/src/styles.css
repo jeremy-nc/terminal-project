@@ -1362,6 +1362,19 @@ html, body { background: var(--bg); }
 }
 .repos-empty { padding: 16px 8px; text-align: center; color: var(--text-muted); font-size: 12px; }
 
+/* Repo picker in the create-workspace modal — reuses .repos-item/.repos-name/
+   .repos-path rows, dropped under the path field. */
+.modal-repo-picker { position: relative; flex: 1; min-width: 0; }
+.modal-repo-picker input { width: 100%; }
+.modal-repo-dropdown {
+  position: absolute; top: calc(100% + 4px); left: 0; right: 0; z-index: 10;
+  max-height: 240px; overflow-y: auto; padding: 4px;
+  background: var(--surface, #16161a);
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  border-radius: 8px;
+  box-shadow: 0 10px 28px rgba(0,0,0,0.5);
+}
+
 /* "Work on this" button on PR rows (resolvable to a local repo) */
 .pr-work {
   font-size: 11px;

@@ -11,8 +11,10 @@ NB: "Workspace" is the top-level unit (workspace.py), distinct from the low-leve
 PTY ``Session`` (session.py). Kinds belong to the Workspace, so everything here is
 ``Workspace*`` — never ``Session*``.
 """
+import glob
 import os
 import re
+import shutil
 import subprocess
 
 
@@ -78,23 +80,83 @@ def _git(repo: str, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(["git", "-C", repo, *args], capture_output=True, text=True)
 
 
+# OS-created cruft that shouldn't keep an otherwise-empty worktree dir alive.
+_DIR_CRUFT = {".DS_Store", "Thumbs.db"}
+
+
 def _prune_empty_parents(worktree_path: str, base: str) -> None:
     """Remove now-empty directories from the worktree's parent up to and including
     ``base`` (the ``.worktrees`` container). A slashed branch
     (``dependabot/terraform/infrastructure``) nests the worktree under intermediate
     dirs; ``git worktree remove`` deletes only the leaf, so without this the empty
-    parents (and the container) linger. Stops at the first non-empty dir (another
-    worktree) and never climbs above ``base``."""
+    parents (and the container) linger. A dir holding nothing but OS cruft
+    (``.DS_Store`` from Finder) counts as empty — we delete the cruft, then the dir.
+    Stops at the first dir with real content (another worktree) and never climbs
+    above ``base``."""
     base = os.path.normpath(base)
     d = os.path.dirname(os.path.normpath(worktree_path))
     while d == base or d.startswith(base + os.sep):
         try:
-            os.rmdir(d)            # only succeeds if the directory is empty
+            entries = os.listdir(d)
         except OSError:
-            break                  # non-empty (another worktree) or already gone
+            break                  # already gone
+        if entries and all(e in _DIR_CRUFT for e in entries):
+            for e in entries:      # cruft-only → clear it so the dir can be removed
+                try:
+                    os.remove(os.path.join(d, e))
+                except OSError:
+                    pass
+        try:
+            os.rmdir(d)            # succeeds only if now empty
+        except OSError:
+            break                  # genuine content (another worktree)
         if d == base:
             break
         d = os.path.dirname(d)
+
+
+# Gitignored files to seed a fresh worktree with (it only checks out *tracked*
+# files, so local env/secrets are missing and the project often can't run).
+_PRESERVE_DEFAULT = (".env", ".env.local", ".env.*")
+
+
+def _preserve_patterns(repo: str) -> list:
+    """Glob patterns of local files to copy into a new worktree. From a
+    ``.worktreeinclude`` file at the repo root (one glob per line, ``#`` comments),
+    else a sensible default (env files)."""
+    inc = os.path.join(repo, ".worktreeinclude")
+    if os.path.isfile(inc):
+        try:
+            with open(inc, encoding="utf-8") as f:
+                pats = [ln.strip() for ln in f if ln.strip() and not ln.startswith("#")]
+            if pats:
+                return pats
+        except OSError:
+            pass
+    return list(_PRESERVE_DEFAULT)
+
+
+def _copy_preserved_files(repo: str, worktree: str) -> None:
+    """Copy gitignored local files (``.env`` etc.) from the source repo's working
+    tree into a freshly-created worktree. Only copies files that are *actually
+    gitignored* (so tracked files are never duplicated) and not already present.
+    Best-effort: a bare repo has no working tree to copy from, and any IO error is
+    skipped silently."""
+    for pat in _preserve_patterns(repo):
+        for src in glob.glob(os.path.join(repo, pat)):
+            if not os.path.isfile(src):
+                continue
+            rel = os.path.relpath(src, repo)
+            if _git(repo, "check-ignore", "--quiet", rel).returncode != 0:
+                continue  # tracked (or not ignored) — already in the worktree
+            dst = os.path.join(worktree, rel)
+            if os.path.exists(dst):
+                continue
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+            except OSError:
+                pass
 
 
 class WorktreeKind(WorkspaceKind):
@@ -190,6 +252,9 @@ class WorktreeKind(WorkspaceKind):
         if add.returncode != 0:
             _prune_empty_parents(path, self._worktree_base(repo))  # don't leave the dirs we made
             raise WorkspaceError(f"git worktree add failed: {(add.stderr or add.stdout).strip()}")
+        # Seed the fresh worktree with gitignored local files (.env etc.) so the
+        # project can actually run — a checkout only contains tracked files.
+        _copy_preserved_files(repo, path)
         # source: local | remote (fetched from origin) | new
         meta = {"repo": repo, "name": name, "branch": branch,
                 "worktree_path": path, "source": source}

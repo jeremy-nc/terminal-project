@@ -153,7 +153,7 @@ export default function App() {
           className="pipeline-view-wrap"
           style={{ display: view === "pipeline" ? "flex" : "none" }}
         >
-          <WorkspaceTabBar workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} kinds={kinds} closeBlocked={closeBlocked} newWorkspace={newWorkspace} />
+          <WorkspaceTabBar workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} kinds={kinds} closeBlocked={closeBlocked} newWorkspace={newWorkspace} repos={repos} />
           <div className="ws-panels">
             {workspaces.length === 0 ? (
               <div className="ws-empty">Create a session (+) to define and run a pipeline.</div>

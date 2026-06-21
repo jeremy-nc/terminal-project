@@ -1519,6 +1519,9 @@ html, body { background: var(--bg); }
 .slack-msgs { flex: 1; overflow-y: auto; padding: 14px 18px; display: flex; flex-direction: column; gap: 12px; }
 .slack-msg-meta { font-size: 12px; color: var(--text-muted, #9a9aa3); }
 .slack-msg-meta b { color: var(--accent-hover, #8f82ff); font-weight: 600; }
+.slack-msg-link { margin-left: 6px; color: var(--text-faint, #6a6a73); text-decoration: none; font-size: 11px; opacity: 0; transition: opacity .12s, color .12s; }
+.slack-msg:hover .slack-msg-link, .slack-mux-msg:hover .slack-msg-link { opacity: 1; }
+.slack-msg-link:hover { color: var(--accent-hover, #8f82ff); }
 .slack-msg-text { font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 .slack-empty { color: var(--text-muted, #9a9aa3); font-size: 13px; padding: 12px 0; }
 .slack-empty code { background: var(--surface, #16161a); padding: 1px 5px; border-radius: 4px; }

@@ -51,6 +51,7 @@ class SlackService:
         self._channels = []                # cached: [{id, name, is_private}]
         self._user_cache = {}              # user id -> display name
         self._self_id = None               # authenticated user id (for the self-DM)
+        self._team_url = ""                # workspace base url (for message permalinks)
         self.refresh()
 
     def _make_client(self):
@@ -105,6 +106,7 @@ class SlackService:
         self._client = self._make_client()
         self._user_cache.clear()
         self._self_id = None
+        self._team_url = ""
         self._save()
         self.refresh()
         return self.to_json()
@@ -267,13 +269,20 @@ class SlackService:
 
     # ── helpers ──────────────────────────────────────────────────────────────
     def _auth_user_id(self):
-        """The authenticated user's id (cached) — used to pick out the self-DM."""
+        """The authed user's id (cached) — for the self-DM. Captures the workspace
+        url too (same auth.test call) so the client can build message permalinks."""
         if self._self_id is None and self._client:
             try:
-                self._self_id = self._client.auth_test().get("user_id") or ""
+                r = self._client.auth_test()
+                self._self_id = r.get("user_id") or ""
+                self._team_url = r.get("url") or ""
             except Exception:
                 self._self_id = ""
         return self._self_id or ""
+
+    def team_url(self):
+        self._auth_user_id()   # ensures it's populated (cached)
+        return self._team_url or ""
 
     def _user_name(self, uid):
         if not uid:
@@ -293,4 +302,4 @@ class SlackService:
         """Broadcast shape — NEVER includes any secret."""
         return {"configured": self.configured(), "channels": self._channels,
                 "hasApp": self.has_app(), "polled": list(self._polled),
-                "multiplexers": list(self._multiplexers)}
+                "multiplexers": list(self._multiplexers), "teamUrl": self.team_url()}

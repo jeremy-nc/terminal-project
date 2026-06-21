@@ -51,7 +51,7 @@ let _state = {
   // slack domain: connection state + channel list (the token lives server-side
   // only — never sent to the client). slackMessages/slackMentions hold the latest
   // fetch for the Slack tab.
-  slack: { configured: false, channels: [], polled: [], multiplexers: [] },
+  slack: { configured: false, channels: [], polled: [], multiplexers: [], teamUrl: "" },
   slackMessages: {},   // channel id -> recent messages (open-channel load + poller)
   slackMentions: [],
   // Active whole-app animations: [{ type, key }]. Several can run at once so a
@@ -295,7 +295,7 @@ function _handleMsg(msg) {
       break;
     }
     case "slack": {
-      _setState({ slack: { configured: !!msg.configured, channels: msg.channels || [], polled: msg.polled || [], multiplexers: msg.multiplexers || [] } });
+      _setState({ slack: { configured: !!msg.configured, channels: msg.channels || [], polled: msg.polled || [], multiplexers: msg.multiplexers || [], teamUrl: msg.teamUrl || "" } });
       break;
     }
     case "slack_messages": {

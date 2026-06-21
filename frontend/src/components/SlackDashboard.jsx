@@ -15,7 +15,7 @@ function fmtTs(ts) {
  *  stays pinned to the bottom when new messages arrive WHILE you're at the
  *  bottom, but leaves your scroll position alone if you've scrolled up. Polls the
  *  open channel so new messages appear. */
-function SlackMessages({ channel, items, selfPoll = true }) {
+function SlackMessages({ channel, items, selfPoll = true, teamUrl }) {
   const ref = useRef(null);
   const atBottom = useRef(true);          // is the view currently pinned to bottom?
   const prevChannel = useRef(null);
@@ -48,12 +48,20 @@ function SlackMessages({ channel, items, selfPoll = true }) {
         ? <div className="slack-empty">No messages, or this token can't read this channel.</div>
         : items.map((m, i) => (
           <div className="slack-msg" key={m.ts || i}>
-            <div className="slack-msg-meta"><b>{m.user || "?"}</b> <span className="slack-msg-time">{fmtTs(m.ts)}</span></div>
+            <div className="slack-msg-meta"><b>{m.user || "?"}</b> <span className="slack-msg-time">{fmtTs(m.ts)}</span>
+              {teamUrl && <a className="slack-msg-link" href={slackMsgLink(teamUrl, channel, m.ts)} target="_blank" rel="noreferrer" title="Open in Slack">↗</a>}
+            </div>
             <div className="slack-msg-text">{m.text}</div>
           </div>
         ))}
     </div>
   );
+}
+
+/** Build a Slack archive permalink for a message — no API call needed. */
+function slackMsgLink(teamUrl, channel, ts) {
+  if (!teamUrl || !channel || !ts) return "";
+  return `${teamUrl.replace(/\/?$/, "/")}archives/${channel}/p${String(ts).replace(".", "")}`;
 }
 
 /** Label an hour bucket: "19 Jun · 10:00 AM – 11:00 AM". */
@@ -66,7 +74,7 @@ function fmtBucket(start) {
 /** Read-only multiplexer: merges its channels' messages (from the polled map),
  *  sorts by time, and groups into hourly buckets — a #channel sub-label shows
  *  whenever the source changes. All merging is client-side. */
-function SlackMultiplexer({ mux, channels, messages }) {
+function SlackMultiplexer({ mux, channels, messages, teamUrl }) {
   const ref = useRef(null);
   const byId = (id) => channels.find((c) => c.id === id) || null;
 
@@ -106,7 +114,9 @@ function SlackMultiplexer({ mux, channels, messages }) {
               return (
                 <div className="slack-mux-msg" key={`${m.ts}-${m.channel}-${i}`}>
                   {showChan && <div className="slack-mux-chan">{c?.is_im ? "@" : "#"}{c?.name || m.channel}</div>}
-                  <div className="slack-msg-meta"><b>{m.user || "?"}</b> <span className="slack-msg-time">{fmtTs(m.ts)}</span></div>
+                  <div className="slack-msg-meta"><b>{m.user || "?"}</b> <span className="slack-msg-time">{fmtTs(m.ts)}</span>
+                    {teamUrl && <a className="slack-msg-link" href={slackMsgLink(teamUrl, m.channel, m.ts)} target="_blank" rel="noreferrer" title="Open in Slack">↗</a>}
+                  </div>
                   <div className="slack-msg-text">{m.text}</div>
                 </div>
               );
@@ -119,7 +129,7 @@ function SlackMultiplexer({ mux, channels, messages }) {
 
 /** A pinned mini chat window (right panel) for a watched channel — read + post.
  *  Its channel is in the backend poller's set, so it updates without self-polling. */
-function SlackPin({ channel, name, isPrivate, isIm, items, onClose }) {
+function SlackPin({ channel, name, isPrivate, isIm, items, onClose, teamUrl }) {
   const [draft, setDraft] = useState("");
   const send = () => { if (draft.trim()) { sendSlackMessage(channel, draft.trim()); setDraft(""); } };
   return (
@@ -129,7 +139,7 @@ function SlackPin({ channel, name, isPrivate, isIm, items, onClose }) {
         <span className="slack-pin-name">{name}</span>
         <button className="slack-pin-close" title="Unpin" onClick={onClose}>×</button>
       </div>
-      <SlackMessages channel={channel} items={items} selfPoll={false} />
+      <SlackMessages channel={channel} items={items} selfPoll={false} teamUrl={teamUrl} />
       <div className="slack-pin-compose">
         <input value={draft} placeholder={`Message #${name}`}
           onChange={(e) => setDraft(e.target.value)}
@@ -385,7 +395,7 @@ export default function SlackDashboard({ slack, messages, mentions }) {
               })}
               <span className="slack-mux-chip-hint">drag channels here</span>
             </div>
-            <SlackMultiplexer mux={muxObj} channels={slack.channels} messages={messages} />
+            <SlackMultiplexer mux={muxObj} channels={slack.channels} messages={messages} teamUrl={slack.teamUrl} />
           </>
         ) : showMentions ? (
           <>
@@ -395,7 +405,9 @@ export default function SlackDashboard({ slack, messages, mentions }) {
                 ? <div className="slack-empty">No mentions found — needs a user token with <code>search:read</code>.</div>
                 : mentions.map((m, i) => (
                   <div className="slack-msg" key={i}>
-                    <div className="slack-msg-meta"><b>{m.user || "?"}</b> <span className="slack-msg-time">{fmtTs(m.ts)}</span>{m.channel ? ` · #${m.channel}` : ""}</div>
+                    <div className="slack-msg-meta"><b>{m.user || "?"}</b> <span className="slack-msg-time">{fmtTs(m.ts)}</span>{m.channel ? ` · #${m.channel}` : ""}
+                      {m.permalink && <a className="slack-msg-link" href={m.permalink} target="_blank" rel="noreferrer" title="Open in Slack">↗</a>}
+                    </div>
                     <div className="slack-msg-text">{m.text}</div>
                   </div>
                 ))}
@@ -404,7 +416,7 @@ export default function SlackDashboard({ slack, messages, mentions }) {
         ) : selChannel ? (
           <>
             <div className="slack-main-head"><span className="slack-chan-hash">{selChannel.is_im ? "@" : selChannel.is_private ? "🔒" : "#"}</span>{selChannel.name}</div>
-            <SlackMessages channel={selected} items={items} selfPoll={!polled.includes(selected)} />
+            <SlackMessages channel={selected} items={items} selfPoll={!polled.includes(selected)} teamUrl={slack.teamUrl} />
             <div className="slack-compose">
               <input
                 value={draft} placeholder={`Message #${selChannel.name}`}

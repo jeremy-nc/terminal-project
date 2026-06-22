@@ -46,12 +46,14 @@ from terminal.workspace_kinds import get_kind, kinds_manifest, WorkspaceError
 from github.pulls import fetch_my_pulls, GitHubAuthError
 from repos import RepoIndex
 from slack import SlackService
+from automations import AutomationStore, automation_kinds_manifest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "frontend", "dist")
 WORKSPACES_FILE = os.path.join(HERE, "workspaces.json")
 REPOS_FILE = os.path.join(HERE, "repos.json")
 SLACK_FILE = os.path.join(HERE, "slack.json")
+AUTOMATIONS_FILE = os.path.join(HERE, "automations.json")
 
 
 def b64(data: bytes) -> str:
@@ -125,6 +127,7 @@ manager = SessionManager()
 workspaces = WorkspaceStore(WORKSPACES_FILE)
 repo_index = RepoIndex(REPOS_FILE)  # local owner/name -> path map (scanned at startup)
 slack_service = SlackService(SLACK_FILE)  # Slack client (token from slack.json / SLACK_TOKEN)
+automation_store = AutomationStore(AUTOMATIONS_FILE)  # PR→workspace rules (frontend-evaluated)
 hub = Hub()
 
 # Shared interactive-terminal registry (the Terminal-view tabs), mirrored to all
@@ -156,6 +159,13 @@ def _slack_event() -> dict:
     """Slack connection state for the client: {configured, channels}. Never carries
     the token. Broadcast so every window's Slack tab reflects the current state."""
     return {"type": "slack", **slack_service.to_json()}
+
+
+def _automations_event() -> dict:
+    """User automation rules + the kind manifest that drives their editor.
+    Broadcast so every window's Automations panel stays in sync (no secrets)."""
+    return {"type": "automations", "kinds": automation_kinds_manifest(),
+            **automation_store.to_json()}
 
 
 def _workspace_list_event(created: str = None) -> dict:
@@ -477,6 +487,7 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         sub.send(_workspace_list_event())
         sub.send(_repos_event())
         sub.send(_slack_event())
+        sub.send(_automations_event())
         for ws in workspaces.list():
             run = ws.run
             if run and run.task and not run.task.done():
@@ -523,6 +534,13 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         kind_id = msg.get("kind", "directory")
         # Back-compat: an older client sends {dir, name} with no kind/fields.
         fields = msg.get("fields") or {"dir": msg.get("dir")}
+        # Get-or-create: for an EXCLUSIVE kind (worktree: one per repo+branch),
+        # re-creating the same one just loads it instead of erroring — so "Work on
+        # this" on a PR whose worktree already exists navigates to it.
+        existing = workspaces.find_existing(kind_id, fields)
+        if existing is not None:
+            hub.send(_workspace_list_event(created=existing.id))
+            return
         try:
             ws = workspaces.create(kind_id, fields, name=msg.get("name"))
         except WorkspaceError as e:
@@ -533,6 +551,60 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         if ws.meta.get("source") == "remote":
             sub.send({"type": "notice", "message": f"Fetched origin/{ws.meta.get('branch')} and created the worktree."})
         hub.send(_workspace_list_event(created=ws.id))
+        return
+
+    if mtype == "ensure_workspace":
+        # Get-or-create + optional auto-run. The frontend automation engine calls
+        # this for a new PR: idempotent for an exclusive kind (worktree — one per
+        # repo+branch), so re-detecting the same PR never duplicates. `pipeline`
+        # (a parsed spec) runs once on FIRST creation; `dsl` seeds the side panel;
+        # `focus` selects the workspace (manual use) — omitted for background
+        # creates, whose tab appears without stealing the active view.
+        kind_id = msg.get("kind", "worktree")
+        fields = msg.get("fields") or {}
+        focus = bool(msg.get("focus"))
+        existing = workspaces.find_existing(kind_id, fields)
+        if existing is not None:
+            if focus:
+                hub.send(_workspace_list_event(created=existing.id))
+            sub.send({"type": "workspace_ensured", "workspace_id": existing.id, "existed": True})
+            return
+        try:
+            ws = workspaces.create(kind_id, fields, name=msg.get("name"),
+                                   extra_meta=msg.get("meta"))
+        except WorkspaceError as e:
+            sub.send({"type": "error", "message": str(e)})
+            return
+        spec = msg.get("pipeline")
+        if spec:
+            if msg.get("dsl"):
+                workspaces.set_pipeline(ws.id, msg["dsl"])  # show the rule's DSL in the panel
+            # Inject the worktree dir as the run's base cwd (as run_workspace does).
+            if isinstance(spec, dict) and spec.get("type") == "sequence" \
+                    and not spec.get("cwd") and ws.dir:
+                spec = {**spec, "cwd": ws.dir}
+            run = _start_pipeline(sub, hub, spec, msg.get("backend"),
+                                  msg.get("input"), workspace_id=ws.id, previous=None)
+            if run is not None:
+                ws.run = run
+        # Background create: no `created` => the tab appears but the active view
+        # is left alone. Manual (focus) creates select it.
+        hub.send(_workspace_list_event(created=ws.id if focus else None))
+        sub.send({"type": "workspace_ensured", "workspace_id": ws.id, "existed": False})
+        return
+
+    if mtype == "list_automations":
+        sub.send(_automations_event())
+        return
+
+    if mtype == "save_automation":
+        automation_store.save_rule(msg.get("rule") or {})
+        hub.send(_automations_event())
+        return
+
+    if mtype == "delete_automation":
+        automation_store.delete_rule(msg.get("id"))
+        hub.send(_automations_event())
         return
 
     if mtype == "set_pipeline":

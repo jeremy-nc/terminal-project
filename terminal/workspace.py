@@ -80,14 +80,32 @@ class WorkspaceStore:
     def get(self, wid: str):
         return self._workspaces.get(wid)
 
-    def create(self, kind_id: str, fields: dict, name: str = None) -> Workspace:
+    def find_existing(self, kind_id: str, fields: dict):
+        """The existing workspace that get-or-create would collide with, or
+        ``None``. Only kinds with a stable identity dedupe (worktree: one per
+        repo+branch); others (a plain directory) always create a fresh one, so
+        this returns ``None`` for them and the caller proceeds to create."""
+        kind = get_kind(kind_id)
+        key = kind.identity(fields or {})
+        if not key:
+            return None
+        for ws in self._workspaces.values():
+            if ws.kind == kind_id and kind.identity_of(ws) == key:
+                return ws
+        return None
+
+    def create(self, kind_id: str, fields: dict, name: str = None,
+               extra_meta: dict = None) -> Workspace:
         """Provision a workspace of ``kind_id`` from the modal ``fields``. The
         kind's ``prepare`` sets up the working dir (e.g. adds a git worktree) and
-        returns the effective cwd + meta. Raises WorkspaceError on failure."""
+        returns the effective cwd + meta. ``extra_meta`` is merged onto the kind's
+        meta (e.g. the source PR for an automation-created workspace). Raises
+        WorkspaceError on failure."""
         prepared = get_kind(kind_id).prepare(fields or {})
         wid = uuid.uuid4().hex[:8]
         name = name or prepared.get("name") or f"workspace-{len(self._workspaces) + 1}"
-        ws = Workspace(wid, name, prepared["cwd"], "", kind=kind_id, meta=prepared.get("meta") or {})
+        meta = {**(prepared.get("meta") or {}), **(extra_meta or {})}
+        ws = Workspace(wid, name, prepared["cwd"], "", kind=kind_id, meta=meta)
         self._workspaces[wid] = ws
         self._save()
         return ws

@@ -9,6 +9,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { b64dec, strToB64 } from "./wire.js";
 import { APP_FX_TYPES } from "./appFx.js";
+import { parseDsl } from "./pipelineDsl.js";
 
 const WS_URL = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 
@@ -54,6 +55,12 @@ let _state = {
   slack: { configured: false, channels: [], polled: [], multiplexers: [], teamUrl: "" },
   slackMessages: {},   // channel id -> recent messages (open-channel load + poller)
   slackMentions: [],
+  // automations domain: user rules that turn domain events into actions (today:
+  // a new PR -> a worktree workspace running a pipeline). `automationKinds` is the
+  // backend manifest that drives the rule editor generically. Evaluated on the
+  // frontend (see _evaluatePrAutomations) and broadcast so every window agrees.
+  automations: [],
+  automationKinds: [],
   // Active whole-app animations: [{ type, key }]. Several can run at once so a
   // view/action can fire a combination of effects. <AppFx/> renders each.
   appFx: [],
@@ -311,13 +318,24 @@ function _handleMsg(msg) {
       break;
     }
     case "prs": {
+      const prs = msg.prs || [];
       _setState({
-        prs: msg.prs || [],
+        prs,
         prsViewer: msg.viewer ?? _state.prsViewer,
         prsError: msg.error || null,
         prsLoading: false,
         prsUpdatedAt: Date.now(),
       });
+      _evaluatePrAutomations(prs);
+      break;
+    }
+    case "automations": {
+      _setState({ automations: msg.rules || [], automationKinds: msg.kinds || [] });
+      break;
+    }
+    case "workspace_ensured": {
+      // Background get-or-create ack from an automation; focus/selection (when
+      // requested) rides on the workspace_list broadcast, so nothing to do here.
       break;
     }
     case "pipeline_started": {
@@ -603,6 +621,68 @@ export function mountNodeTerm(tabId, host, agentNodeId = null) {
   if (tab.sessionId) _send({ type: "attach", id: tab.sessionId });
 }
 
+
+// ── automations (PR → workspace, evaluated frontend-side) ────────────────────
+// We diff each PR refresh against a seen-set so a rule fires once per NEW PR.
+// The set is seeded silently on the first refresh after (re)connect, so we never
+// act on the pre-existing backlog — only PRs that appear afterwards.
+let _seenPrKeys = null;
+
+function _prKey(pr) { return pr.id || `${pr.repo}#${pr.number}`; }
+
+/** The local checkout path for a PR's repo, or null (can't worktree without one). */
+function _repoPathForPr(pr) {
+  const local = (_state.repos || []).find(
+    (r) => (r.name || "").toLowerCase() === (pr.repo || "").toLowerCase());
+  return local ? local.path : null;
+}
+
+/** Does an active "pr"-kind rule match this PR? (blank filter = match any). */
+function _ruleMatchesPr(rule, pr) {
+  if (!rule.active || rule.kind !== "pr") return false;
+  const m = rule.match || {};
+  const author = (m.author || "").trim().toLowerCase();
+  const repo = (m.repo || "").trim().toLowerCase();
+  if (author && !(pr.author || "").toLowerCase().includes(author)) return false;
+  if (repo && !(pr.repo || "").toLowerCase().includes(repo)) return false;
+  return true;
+}
+
+/** On each PR refresh: for every genuinely-new PR matched by an active rule, ask
+ *  the backend to get-or-create a worktree workspace on its branch and run the
+ *  rule's pipeline spec (in the background — no focus steal). Idempotent end to
+ *  end: the seen-set guards re-sends here, the backend dedupes by repo+branch. */
+function _evaluatePrAutomations(prs) {
+  if (_seenPrKeys === null) {        // first refresh: remember, trigger nothing
+    _seenPrKeys = new Set(prs.map(_prKey));
+    return;
+  }
+  const rules = (_state.automations || []).filter((r) => r.active && r.kind === "pr");
+  for (const pr of prs) {
+    const key = _prKey(pr);
+    if (_seenPrKeys.has(key)) continue;
+    _seenPrKeys.add(key);
+    if (!rules.length) continue;
+    const rule = rules.find((r) => _ruleMatchesPr(r, pr));
+    if (!rule) continue;
+    const repoPath = _repoPathForPr(pr);
+    if (!repoPath) continue;         // no local checkout registered for this repo
+    _send({
+      type: "ensure_workspace",
+      kind: "worktree",
+      fields: { dir: repoPath, name: pr.headRefName || `pr-${pr.number}` },
+      pipeline: parseDsl(rule.spec || ""),
+      dsl: rule.spec || "",
+      meta: { pr: `${pr.repo}#${pr.number}`, automation: rule.id },
+      focus: false,
+    });
+  }
+}
+
+/** Persist a rule (create when it has no id, else update). */
+export function saveAutomation(rule) { _send({ type: "save_automation", rule }); }
+
+export function deleteAutomation(id) { _send({ type: "delete_automation", id }); }
 
 // ── workspace actions ────────────────────────────────────────────────────────
 /** Create a workspace of `kind` (e.g. "directory" | "worktree") from the modal's

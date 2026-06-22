@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from "react";
-import { listPrs } from "../terminalController.js";
+import { listPrs, saveAutomation, deleteAutomation } from "../terminalController.js";
 
 const RELATION_LABELS = { raised: "Raised", assigned: "Assigned", review: "Review", reviewed: "Reviewed" };
 const RELATION_ORDER = ["raised", "assigned", "review", "reviewed"];
@@ -26,9 +26,107 @@ function CiBadge({ state }) {
   return <span className={`pr-badge ${cls}`}>● {label}</span>;
 }
 
+/** A blank rule seeded with the first available kind. */
+function emptyRule(kinds) {
+  return { id: "", name: "", active: true, kind: kinds[0]?.id || "pr", match: {}, spec: "" };
+}
+
+/** Editor for one automation rule. Match fields render generically from the
+ *  selected kind's manifest, so a new backend kind needs no form changes here. */
+function RuleEditor({ rule, kinds, onSave, onCancel }) {
+  const [draft, setDraft] = useState(rule);
+  const kind = kinds.find((k) => k.id === draft.kind) || kinds[0];
+  const setField = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
+  const setMatch = (k, v) => setDraft((d) => ({ ...d, match: { ...d.match, [k]: v } }));
+  return (
+    <div className="auto-editor">
+      <div className="auto-editor-row">
+        <input className="auto-input grow" placeholder="Rule name" value={draft.name}
+          onChange={(e) => setField("name", e.target.value)} />
+        <select className="auto-input" value={draft.kind}
+          onChange={(e) => setField("kind", e.target.value)}>
+          {kinds.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
+        </select>
+      </div>
+      {kind?.description && <div className="auto-hint">{kind.description}</div>}
+      <div className="auto-editor-row">
+        {(kind?.match_fields || []).map((f) => (
+          <label key={f.name} className="auto-field grow">
+            <span>{f.label}</span>
+            <input className="auto-input" placeholder={f.placeholder || ""}
+              value={draft.match?.[f.name] || ""}
+              onChange={(e) => setMatch(f.name, e.target.value)} />
+          </label>
+        ))}
+      </div>
+      <label className="auto-field">
+        <span>Pipeline spec (DSL) — the spec decides whether an agent runs</span>
+        <textarea className="auto-spec" rows={3} placeholder="seq: claude"
+          value={draft.spec} onChange={(e) => setField("spec", e.target.value)} />
+      </label>
+      <div className="auto-editor-actions">
+        <label className="auto-active">
+          <input type="checkbox" checked={!!draft.active}
+            onChange={(e) => setField("active", e.target.checked)} /> Active
+        </label>
+        <span className="auto-spacer" />
+        <button className="auto-btn" onClick={onCancel}>Cancel</button>
+        <button className="auto-btn primary" disabled={!draft.name.trim()}
+          onClick={() => onSave(draft)}>Save</button>
+      </div>
+    </div>
+  );
+}
+
+/** Collapsible Automations manager: list + add/edit/delete rules that turn a new
+ *  matching PR into a background worktree workspace running the rule's spec. */
+function AutomationsPanel({ automations, kinds }) {
+  const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState(null);   // rule being edited, or null
+  const kindLabel = (id) => kinds.find((k) => k.id === id)?.label || id;
+  const save = (rule) => { saveAutomation(rule); setEditing(null); };
+  return (
+    <div className="auto-panel">
+      <button className="auto-panel-head" onClick={() => setOpen((o) => !o)}>
+        <span className="auto-caret">{open ? "▾" : "▸"}</span>
+        Automations <span className="auto-count">{automations.length}</span>
+      </button>
+      {open && (
+        <div className="auto-body">
+          {automations.length === 0 && !editing && (
+            <div className="auto-empty">
+              No automations yet. Add a rule to auto-create a worktree workspace when a matching PR appears.
+            </div>
+          )}
+          {automations.map((r) => (
+            <div key={r.id} className={`auto-rule${r.active ? "" : " off"}`}>
+              <div className="auto-rule-main">
+                <span className={`auto-dot${r.active ? " on" : ""}`} />
+                <span className="auto-rule-name">{r.name}</span>
+                <span className="auto-rule-kind">{kindLabel(r.kind)}</span>
+                <span className="auto-rule-match">
+                  {Object.entries(r.match || {}).filter(([, v]) => v).map(([k, v]) => `${k}: ${v}`).join(" · ") || "any"}
+                </span>
+              </div>
+              <div className="auto-rule-actions">
+                <code className="auto-rule-spec" title={r.spec}>{r.spec || "—"}</code>
+                <button className="auto-btn" onClick={() => setEditing(r)}>Edit</button>
+                <button className="auto-btn danger" title="Delete" onClick={() => deleteAutomation(r.id)}>✕</button>
+              </div>
+            </div>
+          ))}
+          {editing
+            ? <RuleEditor key={editing.id || "new"} rule={editing} kinds={kinds} onSave={save} onCancel={() => setEditing(null)} />
+            : <button className="auto-add" onClick={() => setEditing(emptyRule(kinds))}>+ Add automation</button>}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** GitHub PR inbox: one flat list, filtered by relation chips. A PR appears once
  *  even if it matches multiple buckets (its chips show all that apply). */
-export default function PullRequestsDashboard({ prs, viewer, loading, error, updatedAt, localRepos, onWorkOn }) {
+export default function PullRequestsDashboard({ prs, viewer, loading, error, updatedAt, localRepos, onWorkOn, automations = [], automationKinds = [] }) {
   const [active, setActive] = useState({ raised: true, assigned: true, review: true, reviewed: true });
   const toggle = (k) => setActive((s) => ({ ...s, [k]: !s[k] }));
 
@@ -65,6 +163,10 @@ export default function PullRequestsDashboard({ prs, viewer, loading, error, upd
           </button>
         </div>
       </div>
+
+      {automationKinds.length > 0 && (
+        <AutomationsPanel automations={automations} kinds={automationKinds} />
+      )}
 
       {error && (
         <div className="pr-error">

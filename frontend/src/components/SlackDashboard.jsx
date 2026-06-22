@@ -165,6 +165,7 @@ export default function SlackDashboard({ slack, messages, mentions }) {
   const [nameDraft, setNameDraft] = useState("");
   const [draft, setDraft] = useState("");
   const [dragOver, setDragOver] = useState(false);
+  const [panelsCollapsed, setPanelsCollapsed] = useState(false);  // pinned pane → thin bar
   const prevLatest = useRef({});                 // channel id -> last-seen latest ts
   const [unread, setUnread] = useState({});      // channel id -> true (new since poll)
 
@@ -432,28 +433,54 @@ export default function SlackDashboard({ slack, messages, mentions }) {
         )}
       </div>
 
-      <div
-        className={`slack-panels${dragOver ? " drag-over" : ""}`}
-        onDragOver={(e) => e.preventDefault()}
-        onDragEnter={() => setDragOver(true)}
-        onDragLeave={(e) => { if (e.currentTarget === e.target) setDragOver(false); }}
-        onDrop={(e) => {
-          e.preventDefault(); setDragOver(false);
-          const id = e.dataTransfer.getData("text/slack-channel");
-          if (id && !polled.includes(id)) { setSlackPolled([...polled, id]); loadSlackMessages(id); }
-        }}
-      >
-        {polled.length === 0
-          ? <div className="slack-panels-empty">Drag channels here<br />for live pinned chat windows.</div>
-          : polled.map((id) => {
-              const c = slack.channels.find((ch) => ch.id === id);
-              if (!c) return null;
-              return (
-                <SlackPin key={id} channel={id} name={c.name} isPrivate={c.is_private} isIm={c.is_im}
-                  items={messages[id] || []} onClose={() => toggleWatch(id)} />
-              );
-            })}
-      </div>
+      {panelsCollapsed ? (
+        // Collapsed: a thin vertical bar that drops back to the full pane on click.
+        // Still a drop target — dragging a channel onto it pins AND re-opens the pane.
+        <button
+          className={`slack-panels-bar${dragOver ? " drag-over" : ""}`}
+          title="Show pinned channels"
+          onClick={() => setPanelsCollapsed(false)}
+          onDragOver={(e) => e.preventDefault()}
+          onDragEnter={() => setDragOver(true)}
+          onDragLeave={(e) => { if (e.currentTarget === e.target) setDragOver(false); }}
+          onDrop={(e) => {
+            e.preventDefault(); setDragOver(false); setPanelsCollapsed(false);
+            const id = e.dataTransfer.getData("text/slack-channel");
+            if (id && !polled.includes(id)) { setSlackPolled([...polled, id]); loadSlackMessages(id); }
+          }}
+        >
+          <span className="slack-panels-bar-caret">‹</span>
+          <span className="slack-panels-bar-label">PINNED</span>
+          {polled.length > 0 && <span className="slack-panels-bar-count">{polled.length}</span>}
+        </button>
+      ) : (
+        <div
+          className={`slack-panels${dragOver ? " drag-over" : ""}`}
+          onDragOver={(e) => e.preventDefault()}
+          onDragEnter={() => setDragOver(true)}
+          onDragLeave={(e) => { if (e.currentTarget === e.target) setDragOver(false); }}
+          onDrop={(e) => {
+            e.preventDefault(); setDragOver(false);
+            const id = e.dataTransfer.getData("text/slack-channel");
+            if (id && !polled.includes(id)) { setSlackPolled([...polled, id]); loadSlackMessages(id); }
+          }}
+        >
+          <div className="slack-panels-head">
+            <span>Pinned{polled.length ? ` · ${polled.length}` : ""}</span>
+            <button className="slack-panels-collapse" title="Collapse" onClick={() => setPanelsCollapsed(true)}>›</button>
+          </div>
+          {polled.length === 0
+            ? <div className="slack-panels-empty">Drag channels here<br />for live pinned chat windows.</div>
+            : polled.map((id) => {
+                const c = slack.channels.find((ch) => ch.id === id);
+                if (!c) return null;
+                return (
+                  <SlackPin key={id} channel={id} name={c.name} isPrivate={c.is_private} isIm={c.is_im}
+                    items={messages[id] || []} onClose={() => toggleWatch(id)} teamUrl={slack.teamUrl} />
+                );
+              })}
+        </div>
+      )}
     </div>
   );
 }

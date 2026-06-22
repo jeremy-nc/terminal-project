@@ -39,6 +39,19 @@ class WorkspaceKind:
         """Tear down on delete. Return human-readable warnings (empty = clean)."""
         return []
 
+    def identity(self, fields: dict):
+        """Canonical key for get-or-create from create-modal ``fields``, computed
+        WITHOUT provisioning — or ``None`` when this kind isn't idempotent. A
+        ``None`` means "always create a fresh workspace"; e.g. several pipelines
+        can legitimately share one plain directory, so DirectoryKind stays
+        non-idempotent. Only an EXCLUSIVE kind (a worktree owns its path) returns
+        a key, so get-or-create can dedupe on it."""
+        return None
+
+    def identity_of(self, ws):
+        """The same canonical key for an ALREADY-created workspace, or ``None``."""
+        return None
+
 
 def _expand(path: str) -> str:
     return os.path.normpath(os.path.expanduser((path or "").strip()))
@@ -179,6 +192,19 @@ class WorktreeKind(WorkspaceKind):
 
     def _worktree_path(self, repo: str, branch: str) -> str:
         return os.path.join(self._worktree_base(repo), branch)
+
+    def identity(self, fields: dict):
+        """A worktree is EXCLUSIVE: only one can exist per (repo, branch) — the
+        path ``<repo>.worktrees/<branch>`` collides — so that path IS the identity
+        get-or-create dedupes on. ``None`` if the fields don't yield one yet."""
+        repo = _expand(fields.get("dir") or "")
+        branch = _sanitize_branch((fields.get("name") or "").strip())
+        return self._worktree_path(repo, branch) if (repo and branch) else None
+
+    def identity_of(self, ws):
+        # Defensive: a worktree workspace missing this won't match (degrades to
+        # "always create"), never matches the wrong one.
+        return ws.meta.get("worktree_path") or None
 
     def prepare(self, fields: dict) -> dict:
         repo = _expand(fields.get("dir") or "")

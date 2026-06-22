@@ -214,6 +214,29 @@ html, body { background: var(--bg); }
   color: #6fb6ff;
 }
 .toggle-btn.active .toggle-badge { background: rgba(255, 255, 255, 0.25); color: #fff; }
+/* "Live" badge on the Pipeline tab: N workspaces currently running. Pulses so a
+   background automation run is noticeable without stealing focus. */
+.run-indicator {
+  display: inline-block;
+  margin-left: 6px;
+  min-width: 17px;
+  padding: 0 5px;
+  border-radius: 999px;
+  font-size: 10.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  background: rgba(76, 175, 114, 0.22);
+  color: #6ee29a;
+  box-shadow: 0 0 0 0 rgba(76, 175, 114, 0.5);
+  animation: run-pulse 1.8s ease-out infinite;
+}
+.toggle-btn.active .run-indicator { background: rgba(255, 255, 255, 0.28); color: #fff; }
+@keyframes run-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(76, 175, 114, 0.45); }
+  70%  { box-shadow: 0 0 0 5px rgba(76, 175, 114, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(76, 175, 114, 0); }
+}
 .toolbar .title {
   font-weight: 600;
   font-size: 13px;
@@ -505,6 +528,73 @@ html, body { background: var(--bg); }
   flex-direction: column;
   background: var(--bg, #0e0e10);
 }
+
+/* ── Automations panel (PR → workspace rules) ─────────────────────────────── */
+.auto-panel { border-bottom: 1px solid var(--border, #2a2a3a); background: var(--bg-alt, #131318); }
+.auto-panel-head {
+  display: flex; align-items: center; gap: 8px; width: 100%;
+  padding: 9px 16px; background: none; border: none; cursor: pointer;
+  color: var(--text, #d6d6de); font-size: 13px; font-weight: 600; text-align: left;
+}
+.auto-panel-head:hover { background: rgba(255,255,255,.03); }
+.auto-caret { color: var(--text-faint, #6a6a73); font-size: 11px; width: 12px; }
+.auto-count {
+  font-size: 11px; font-weight: 500; color: var(--text-muted, #9a9aa3);
+  background: var(--bg, #0e0e10); border: 1px solid var(--border, #2a2a3a);
+  border-radius: 10px; padding: 0 7px; line-height: 17px;
+}
+.auto-body { padding: 4px 14px 14px; display: flex; flex-direction: column; gap: 8px; }
+.auto-empty { color: var(--text-muted, #9a9aa3); font-size: 12.5px; padding: 6px 2px; }
+.auto-rule {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border: 1px solid var(--border, #2a2a3a); border-radius: 8px; background: var(--bg, #0e0e10);
+}
+.auto-rule.off { opacity: .55; }
+.auto-rule-main { display: flex; align-items: center; gap: 8px; min-width: 0; flex: 1; }
+.auto-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-faint, #6a6a73); flex: none; }
+.auto-dot.on { background: #4caf72; box-shadow: 0 0 5px #4caf7288; }
+.auto-rule-name { font-size: 13px; font-weight: 600; white-space: nowrap; }
+.auto-rule-kind {
+  font-size: 10.5px; color: var(--accent-hover, #8f82ff);
+  border: 1px solid var(--accent-hover, #8f82ff); border-radius: 4px; padding: 0 5px; line-height: 16px;
+}
+.auto-rule-match { font-size: 12px; color: var(--text-muted, #9a9aa3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.auto-rule-actions { display: flex; align-items: center; gap: 8px; flex: none; }
+.auto-rule-spec {
+  font-size: 11px; color: var(--text-muted, #9a9aa3); max-width: 220px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--bg-alt, #131318); border: 1px solid var(--border, #2a2a3a); border-radius: 4px; padding: 1px 6px;
+}
+.auto-btn {
+  font-size: 12px; padding: 3px 10px; border-radius: 6px; cursor: pointer;
+  background: var(--bg-alt, #131318); color: var(--text, #d6d6de); border: 1px solid var(--border, #2a2a3a);
+}
+.auto-btn:hover { background: rgba(255,255,255,.05); }
+.auto-btn.primary { background: var(--accent, #6c5ce7); border-color: var(--accent, #6c5ce7); color: #fff; }
+.auto-btn.primary:disabled { opacity: .5; cursor: default; }
+.auto-btn.danger:hover { color: #ff6b6b; border-color: #ff6b6b66; }
+.auto-add { align-self: flex-start; font-size: 12.5px; padding: 5px 12px; border-radius: 6px;
+  background: none; color: var(--accent-hover, #8f82ff); border: 1px dashed var(--border, #2a2a3a); cursor: pointer; }
+.auto-add:hover { border-color: var(--accent-hover, #8f82ff); }
+.auto-editor {
+  display: flex; flex-direction: column; gap: 8px; padding: 12px;
+  border: 1px solid var(--accent, #6c5ce7); border-radius: 8px; background: var(--bg, #0e0e10);
+}
+.auto-editor-row { display: flex; gap: 8px; }
+.auto-field { display: flex; flex-direction: column; gap: 3px; font-size: 11.5px; color: var(--text-muted, #9a9aa3); }
+.auto-field.grow, .auto-input.grow { flex: 1; }
+.auto-input {
+  font-size: 13px; padding: 5px 8px; border-radius: 6px;
+  background: var(--bg-alt, #131318); color: var(--text, #d6d6de); border: 1px solid var(--border, #2a2a3a);
+}
+.auto-spec {
+  font-family: var(--mono, ui-monospace, monospace); font-size: 12.5px; padding: 7px 9px; border-radius: 6px; resize: vertical;
+  background: var(--bg-alt, #131318); color: var(--text, #d6d6de); border: 1px solid var(--border, #2a2a3a);
+}
+.auto-hint { font-size: 11.5px; color: var(--text-muted, #9a9aa3); line-height: 1.4; }
+.auto-editor-actions { display: flex; align-items: center; gap: 8px; }
+.auto-active { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--text, #d6d6de); }
+.auto-spacer { flex: 1; }
 .pr-header {
   display: flex;
   align-items: center;
@@ -1563,6 +1653,34 @@ html, body { background: var(--bg); }
 }
 .slack-panels.drag-over { background: var(--accent-soft, rgba(124,108,255,0.12)); box-shadow: inset 0 0 0 2px var(--accent, #7c6cff); border-radius: 8px; }
 .slack-panels-empty { margin: auto; text-align: center; color: var(--text-muted, #9a9aa3); font-size: 13px; line-height: 1.6; }
+.slack-panels-head {
+  display: flex; align-items: center; justify-content: space-between; flex-shrink: 0;
+  padding: 2px 4px 4px; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+  color: var(--text-muted, #9a9aa3);
+}
+.slack-panels-collapse {
+  background: none; border: none; color: var(--text-faint, #6a6a73); cursor: pointer;
+  font-size: 16px; line-height: 1; padding: 2px 6px; border-radius: 4px;
+}
+.slack-panels-collapse:hover { color: var(--text, #ededef); background: var(--surface-hover, #1c1c20); }
+/* Collapsed pinned pane: a thin vertical bar. Click (or drop a channel) to reopen. */
+.slack-panels-bar {
+  width: 34px; flex-shrink: 0; border-left: 1px solid var(--border, #2a2a3a);
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+  padding: 12px 0; background: none; cursor: pointer; color: var(--text-muted, #9a9aa3);
+  font: inherit;
+}
+.slack-panels-bar:hover { background: var(--surface-hover, #1c1c20); color: var(--text, #ededef); }
+.slack-panels-bar.drag-over { background: var(--accent-soft, rgba(124,108,255,0.12)); box-shadow: inset 2px 0 0 var(--accent, #7c6cff); }
+.slack-panels-bar-caret { font-size: 16px; line-height: 1; }
+.slack-panels-bar-label {
+  writing-mode: vertical-rl; text-orientation: mixed; letter-spacing: 0.12em;
+  font-size: 11px; text-transform: uppercase;
+}
+.slack-panels-bar-count {
+  min-width: 18px; padding: 1px 5px; border-radius: 999px; font-size: 10.5px; font-weight: 600;
+  text-align: center; background: var(--accent, #7c6cff); color: #fff;
+}
 .slack-pin {
   display: flex; flex-direction: column; height: 280px; flex-shrink: 0;
   border: 1px solid var(--border, #2a2a3a); border-radius: 8px; overflow: hidden;

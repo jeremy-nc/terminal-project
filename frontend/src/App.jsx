@@ -19,7 +19,8 @@ import SlackDashboard from "./components/SlackDashboard.jsx";
 export default function App() {
   const { status, tabs, activeTabId, workspaces, activeWorkspaceId, kinds, closeBlocked, toasts,
           prs, prsViewer, prsLoading, prsError, prsUpdatedAt, appFx,
-          repos, repoRoots, slack, slackMessages, slackMentions, newWorkspace } = useSyncExternalStore(subscribe, getSnapshot);
+          repos, repoRoots, slack, slackMessages, slackMentions, newWorkspace,
+          automations, automationKinds } = useSyncExternalStore(subscribe, getSnapshot);
   // A shared deep-link (/shared/workspace/{wid}/t/{nodeId}) just selects the
   // Share view with this target; no separate page.
   const shareTarget = useMemo(() => {
@@ -80,6 +81,9 @@ export default function App() {
   // Which PR repos have a local checkout (lowercased owner/name), and the action
   // that turns a PR into a pre-filled worktree workspace on its branch.
   const localRepos = useMemo(() => new Set(repos.map(r => r.name.toLowerCase())), [repos]);
+  // How many workspaces are mid-run — drives the Pipeline tab's "live" badge, so a
+  // background automation run is discoverable even when its tab isn't focused.
+  const runningCount = useMemo(() => workspaces.filter(w => w.status === "running").length, [workspaces]);
   const onWorkOnPr = (pr) => {
     const local = repos.find(r => r.name.toLowerCase() === (pr.repo || "").toLowerCase());
     if (!local) return;
@@ -110,6 +114,14 @@ export default function App() {
             onClick={() => setView("pipeline")}
           >
             Pipeline
+            {runningCount > 0 && (
+              <span
+                className="run-indicator"
+                title={`${runningCount} workspace${runningCount > 1 ? "s" : ""} running`}
+              >
+                {runningCount}
+              </span>
+            )}
           </button>
           <button
             className={`toggle-btn ${view === "share" ? "active" : ""}`}
@@ -205,6 +217,8 @@ export default function App() {
             updatedAt={prsUpdatedAt}
             localRepos={localRepos}
             onWorkOn={onWorkOnPr}
+            automations={automations}
+            automationKinds={automationKinds}
           />
         </div>
 

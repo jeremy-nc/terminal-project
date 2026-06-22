@@ -5,6 +5,7 @@ import { b64dec } from "../wire.js";
 import OpenInTerminalButton from "./OpenInTerminalButton.jsx";
 import CopyLinkButton from "./CopyLinkButton.jsx";
 import WorldView from "./WorldView.jsx";
+import TeamCityBranchBuilds from "./TeamCityBranchBuilds.jsx";
 
 // ── 3D-world stage helpers: one room per top-level pipeline stage ────────────
 function stageLabel(node) {
@@ -81,6 +82,9 @@ export default function PipelineDashboard({ workspace, tabs }) {
   // disposed/re-attached on tab switch — re-attaching replays the raw PTY buffer,
   // which corrupts an interactive TUI (the repeating DA-query garbage).
   const active = workspace || null;
+  // Git branch this workspace tracks (worktree kind only) — drives the TeamCity
+  // branch panel. null for a plain directory workspace, which hides the panel.
+  const branch = active?.kind === "worktree" ? (active?.meta?.branch || null) : null;
 
   // Parsed preview of the active workspace's DSL — used for the pre-run tree and
   // as the spec to run.
@@ -437,28 +441,32 @@ export default function PipelineDashboard({ workspace, tabs }) {
       </div>
 
       <div className="pipeline-outputs">
-        <div className="sidebar-header">Node Outputs</div>
-        <div className="outputs-list">
-          {active && active.outputs && Object.keys(active.outputs).length > 0 ? (
-            Object.entries(active.outputs)
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([nodeId, res]) => (
-                <div key={nodeId} className="output-item">
-                  <div className="output-node-id">
-                    <span>{nodeId}</span>
-                    {res.exit_code != null && (
-                      <span className="output-exit">exit {res.exit_code}</span>
-                    )}
+        <div className="outputs-main">
+          <div className="sidebar-header">Node Outputs</div>
+          <div className="outputs-list">
+            {active && active.outputs && Object.keys(active.outputs).length > 0 ? (
+              Object.entries(active.outputs)
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([nodeId, res]) => (
+                  <div key={nodeId} className="output-item">
+                    <div className="output-node-id">
+                      <span>{nodeId}</span>
+                      {res.exit_code != null && (
+                        <span className="output-exit">exit {res.exit_code}</span>
+                      )}
+                    </div>
+                    <pre className="output-text">{decodeOne(res)}</pre>
                   </div>
-                  <pre className="output-text">{decodeOne(res)}</pre>
-                </div>
-              ))
-          ) : (
-            <div className="text-faint">
-              {running ? "Outputs appear as each node finishes…" : "Run a session to see each node's output."}
-            </div>
-          )}
+                ))
+            ) : (
+              <div className="text-faint">
+                {running ? "Outputs appear as each node finishes…" : "Run a session to see each node's output."}
+              </div>
+            )}
+          </div>
         </div>
+        {/* Branch-scoped TeamCity builds (bottom ~⅓); hides itself for non-git workspaces. */}
+        <TeamCityBranchBuilds branch={branch} repo={active?.meta?.repo || ""} />
       </div>
     </div>
   );

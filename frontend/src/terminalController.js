@@ -30,6 +30,9 @@ let _state = {
   // can run concurrently; the dashboard renders the active one.
   workspaces: [],       // [{ id, name, dir, dsl, kind, meta, status, spec, statusById, sessionById, childrenByParent, outputs, result, warnings, error, currentStage }]
   activeWorkspaceId: null,
+  // Decoupled tab order: [workspace_id] from the backend's WorkspaceOrder store,
+  // reconciled against the live list. Drives tab order; Workspace has no order field.
+  workspaceOrder: [],
   // Workspace-kind manifest from the server: [{ id, label, fields }]. Drives the
   // create modal kind-agnostically (a new backend kind appears with no UI change).
   kinds: [],
@@ -61,6 +64,12 @@ let _state = {
   // frontend (see _evaluatePrAutomations) and broadcast so every window agrees.
   automations: [],
   automationKinds: [],
+  // CI/CD domain → TeamCity subdomain: connection state + live recent-build feed.
+  // The token/OAuth secret live server-side only (never sent to the client).
+  cicd: { teamcity: { configured: false, connected: false, url: "", hasToken: false,
+                      hasOauthClient: false, hasCreds: false, builds: [], projects: [], error: null } },
+  teamcityProjectBuilds: {},   // projectId -> recent builds (on-demand, picker selection)
+  teamcityBranchBuilds: {},    // branch -> recent builds (poller-fed; per-workspace branch panel)
   // Active whole-app animations: [{ type, key }]. Several can run at once so a
   // view/action can fire a combination of effects. <AppFx/> renders each.
   appFx: [],
@@ -168,6 +177,9 @@ function _connect() {
     // Fetch the GitHub PR inbox on every (re)connect, so the data is fresh
     // whenever the socket establishes — not just when the PR view is opened.
     listPrs();
+    // Re-register any open branch panels — the backend's watched set is in-memory
+    // and is lost across a server restart/reconnect.
+    if (_branchWatchers.size) _sendWatchedBranches();
     // Reconnect: re-subscribe any already-mounted terminals (reset first so the
     // replay doesn't duplicate what's already on screen).
     for (const tabId of _terms.keys()) {
@@ -288,7 +300,8 @@ function _handleMsg(msg) {
       // Clear a stale block once its workspace is gone.
       const blocked = _state.closeBlocked && merged.find((w) => w.id === _state.closeBlocked.workspaceId)
         ? _state.closeBlocked : null;
-      _setState({ workspaces: merged, activeWorkspaceId: active, kinds: msg.kinds || _state.kinds, closeBlocked: blocked });
+      _setState({ workspaces: merged, activeWorkspaceId: active, kinds: msg.kinds || _state.kinds,
+                  closeBlocked: blocked, workspaceOrder: msg.order || [] });
       break;
     }
     case "workspace_cleanup_blocked": {
@@ -331,6 +344,19 @@ function _handleMsg(msg) {
     }
     case "automations": {
       _setState({ automations: msg.rules || [], automationKinds: msg.kinds || [] });
+      break;
+    }
+    case "cicd": {
+      _setState({ cicd: { teamcity: msg.teamcity || {} } });
+      break;
+    }
+    case "teamcity_project_builds": {
+      _setState({ teamcityProjectBuilds: { ..._state.teamcityProjectBuilds, [msg.projectId]: msg.builds || [] } });
+      break;
+    }
+    case "teamcity_branch_builds": {
+      const key = teamcityBranchKey(msg.repo, msg.branch);
+      _setState({ teamcityBranchBuilds: { ..._state.teamcityBranchBuilds, [key]: msg.builds || [] } });
       break;
     }
     case "workspace_ensured": {
@@ -684,6 +710,44 @@ export function saveAutomation(rule) { _send({ type: "save_automation", rule });
 
 export function deleteAutomation(id) { _send({ type: "delete_automation", id }); }
 
+// ── CI/CD domain → TeamCity subdomain ────────────────────────────────────────
+export function setTeamCityConfig({ url, token, clientId, clientSecret }) {
+  _send({ type: "set_teamcity_config", url, token, clientId, clientSecret });
+}
+/** Kick off the Google IAP browser consent (opens a tab on this machine). */
+export function connectTeamCity() { _send({ type: "connect_teamcity" }); }
+export function refreshTeamCity() { _send({ type: "teamcity_refresh" }); }
+export function loadTeamCityProjectBuilds(projectId) { if (projectId) _send({ type: "teamcity_project_builds", projectId }); }
+
+// A branch panel is identified by (repo, branch) — Dependabot reuses the same
+// branch name across repos, so the repo scopes it. Panels are ref-counted: N
+// mounted panels for the same (repo, branch) keep it in the backend poller's
+// watched set exactly once; it drops out when the last unmounts (no leak).
+export function teamcityBranchKey(repo, branch) { return `${repo || ""} ${branch || ""}`; }
+const _branchWatchers = new Map();   // key -> { count, repo, branch }
+function _sendWatchedBranches() {
+  _send({ type: "teamcity_set_watched_branches",
+          branches: [..._branchWatchers.values()].map(({ repo, branch }) => ({ repo, branch })) });
+}
+export function watchTeamCityBranch(repo, branch) {
+  if (!branch) return;
+  const key = teamcityBranchKey(repo, branch);
+  const e = _branchWatchers.get(key);
+  if (e) { e.count += 1; }
+  else { _branchWatchers.set(key, { count: 1, repo, branch }); _sendWatchedBranches(); }
+}
+export function unwatchTeamCityBranch(repo, branch) {
+  if (!branch) return;
+  const key = teamcityBranchKey(repo, branch);
+  const e = _branchWatchers.get(key);
+  if (!e) return;
+  e.count -= 1;
+  if (e.count <= 0) { _branchWatchers.delete(key); _sendWatchedBranches(); }
+}
+export function triggerTeamCityBuild(buildTypeId, branch) { _send({ type: "teamcity_trigger", buildTypeId, branch }); }
+export function cancelTeamCityBuild(buildId, state) { _send({ type: "teamcity_cancel", buildId, state }); }
+export function rerunTeamCityBuild(buildId) { _send({ type: "teamcity_rerun", buildId }); }
+
 // ── workspace actions ────────────────────────────────────────────────────────
 /** Create a workspace of `kind` (e.g. "directory" | "worktree") from the modal's
  *  field values. The backend's kind adapter provisions the working dir. */
@@ -792,6 +856,12 @@ export function sendSlackMessage(channel, text) {
 export function selectWorkspace(wid) {
   _setState({ activeWorkspaceId: wid });
   setTimeout(refitNodes, 0); // the now-visible workspace's node terminals
+}
+
+/** Persist a new tab order (decoupled from the Workspace model). The server
+ *  stores + broadcasts it, so every window and a reload reflect the order. */
+export function setWorkspaceOrder(order) {
+  _send({ type: "set_workspace_order", order });
 }
 
 export function setWorkspaceDsl(wid, dsl) {

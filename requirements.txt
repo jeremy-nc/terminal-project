@@ -3,3 +3,6 @@ uvicorn[standard]==0.34.0
 python-dotenv==1.2.1
 anthropic==0.109.1
 slack_sdk==3.42.0
+google-auth==2.40.3
+google-auth-oauthlib==1.2.2
+httpx==0.28.1

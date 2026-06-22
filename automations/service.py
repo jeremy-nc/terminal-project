@@ -53,6 +53,7 @@ class AutomationStore:
                 match[str(k)] = str(v or "").strip()
         return {"id": str(r.get("id")), "name": str(r.get("name") or "Automation"),
                 "active": bool(r.get("active", True)), "kind": kind,
+                "description": str(r.get("description") or ""),  # blank → UI shows the kind's default
                 "match": match, "spec": str(r.get("spec") or "")}
 
     def save_rule(self, rule: dict) -> dict:

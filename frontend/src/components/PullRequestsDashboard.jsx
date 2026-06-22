@@ -28,13 +28,14 @@ function CiBadge({ state }) {
 
 /** A blank rule seeded with the first available kind. */
 function emptyRule(kinds) {
-  return { id: "", name: "", active: true, kind: kinds[0]?.id || "pr", match: {}, spec: "" };
+  return { id: "", name: "", active: true, kind: kinds[0]?.id || "pr", match: {}, spec: "", description: "" };
 }
 
 /** Editor for one automation rule. Match fields render generically from the
  *  selected kind's manifest, so a new backend kind needs no form changes here. */
 function RuleEditor({ rule, kinds, onSave, onCancel }) {
   const [draft, setDraft] = useState(rule);
+  const [editingDesc, setEditingDesc] = useState(false);
   const kind = kinds.find((k) => k.id === draft.kind) || kinds[0];
   const setField = (k, v) => setDraft((d) => ({ ...d, [k]: v }));
   const setMatch = (k, v) => setDraft((d) => ({ ...d, match: { ...d.match, [k]: v } }));
@@ -48,7 +49,21 @@ function RuleEditor({ rule, kinds, onSave, onCancel }) {
           {kinds.map((k) => <option key={k.id} value={k.id}>{k.label}</option>)}
         </select>
       </div>
-      {kind?.description && <div className="auto-hint">{kind.description}</div>}
+      <div className="auto-desc">
+        {editingDesc ? (
+          <textarea className="auto-input auto-desc-edit" rows={2} autoFocus
+            value={draft.description ?? ""}
+            onChange={(e) => setField("description", e.target.value)}
+            onBlur={() => setEditingDesc(false)}
+            onKeyDown={(e) => { if (e.key === "Escape") setEditingDesc(false); }} />
+        ) : (
+          <>
+            <span className="auto-hint">{draft.description?.trim() || kind?.description || "No description."}</span>
+            <button className="auto-pen" title="Edit description"
+              onClick={() => { if (!draft.description) setField("description", kind?.description || ""); setEditingDesc(true); }}>✎</button>
+          </>
+        )}
+      </div>
       <div className="auto-editor-row">
         {(kind?.match_fields || []).map((f) => (
           <label key={f.name} className="auto-field grow">

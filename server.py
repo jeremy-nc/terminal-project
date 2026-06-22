@@ -40,20 +40,23 @@ from fastapi.staticfiles import StaticFiles
 
 from terminal import (
     SessionManager, Subscriber, build_node_tree, PipelineEngine, PipelineRun,
-    WorkspaceStore,
+    WorkspaceStore, WorkspaceOrder,
 )
 from terminal.workspace_kinds import get_kind, kinds_manifest, WorkspaceError
 from github.pulls import fetch_my_pulls, GitHubAuthError
 from repos import RepoIndex
 from slack import SlackService
 from automations import AutomationStore, automation_kinds_manifest
+from cicd import TeamCityService
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "frontend", "dist")
 WORKSPACES_FILE = os.path.join(HERE, "workspaces.json")
+WORKSPACE_ORDER_FILE = os.path.join(HERE, "workspace_order.json")
 REPOS_FILE = os.path.join(HERE, "repos.json")
 SLACK_FILE = os.path.join(HERE, "slack.json")
 AUTOMATIONS_FILE = os.path.join(HERE, "automations.json")
+TEAMCITY_FILE = os.path.join(HERE, "teamcity.json")
 
 
 def b64(data: bytes) -> str:
@@ -125,9 +128,11 @@ class Hub:
 
 manager = SessionManager()
 workspaces = WorkspaceStore(WORKSPACES_FILE)
+workspace_order = WorkspaceOrder(WORKSPACE_ORDER_FILE)  # decoupled display order (tab reordering)
 repo_index = RepoIndex(REPOS_FILE)  # local owner/name -> path map (scanned at startup)
 slack_service = SlackService(SLACK_FILE)  # Slack client (token from slack.json / SLACK_TOKEN)
 automation_store = AutomationStore(AUTOMATIONS_FILE)  # PR→workspace rules (frontend-evaluated)
+teamcity_service = TeamCityService(TEAMCITY_FILE)  # CI/CD domain → TeamCity subdomain (IAP-fronted)
 hub = Hub()
 
 # Shared interactive-terminal registry (the Terminal-view tabs), mirrored to all
@@ -168,6 +173,12 @@ def _automations_event() -> dict:
             **automation_store.to_json()}
 
 
+def _cicd_event() -> dict:
+    """CI/CD domain state for the client. Today: the TeamCity subdomain
+    (connection state + the recent-build feed). Never carries a token/secret."""
+    return {"type": "cicd", "teamcity": teamcity_service.to_json()}
+
+
 def _workspace_list_event(created: str = None) -> dict:
     return {
         "type": "workspace_list",
@@ -177,6 +188,10 @@ def _workspace_list_event(created: str = None) -> dict:
         "created": created,
         # Kind manifest so the create modal can render kind-agnostically.
         "kinds": kinds_manifest(),
+        # Decoupled display order (a separate store; Workspace has no order field).
+        # Self-healing against the live list: new workspaces append, deleted drop,
+        # and the change is persisted — so no per-create/delete hooks are needed.
+        "order": workspace_order.reconcile([w.id for w in workspaces.list()]),
     }
 
 
@@ -220,6 +235,33 @@ async def _poll_slack():
                 print(f"[slack] poll {ch}: {e}", flush=True)
 
 
+CICD_POLL_INTERVAL = 20  # seconds — refresh the TeamCity build feed
+
+
+async def _poll_cicd():
+    """Refresh the TeamCity build feed on an interval and broadcast it, so the
+    CI/CD view updates live. Paused when no windows are connected or not set up."""
+    while True:
+        await asyncio.sleep(CICD_POLL_INTERVAL)
+        if hub.empty() or not teamcity_service.configured():
+            continue
+        try:
+            await asyncio.to_thread(teamcity_service.refresh)
+            hub.send(_cicd_event())
+        except Exception as e:   # never let a blip kill the loop
+            print(f"[teamcity] poll: {e}", flush=True)
+        # Same loop/interval also refreshes each WATCHED branch (the union of open
+        # branch panels) and broadcasts it, so every window updates live.
+        for w in teamcity_service.watched_branches():
+            try:
+                builds = await asyncio.to_thread(
+                    teamcity_service.branch_builds, w["branch"], w.get("repo", ""), 25)
+                hub.send({"type": "teamcity_branch_builds", "branch": w["branch"],
+                          "repo": w.get("repo", ""), "builds": builds})
+            except Exception as e:
+                print(f"[teamcity] poll branch {w.get('branch')}: {e}", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     manager.loop = asyncio.get_running_loop()
@@ -228,9 +270,11 @@ async def lifespan(app: FastAPI):
     manager.reset_backend()
     pulls_task = asyncio.create_task(_poll_pulls())
     slack_task = asyncio.create_task(_poll_slack())
+    cicd_task = asyncio.create_task(_poll_cicd())
     yield
     pulls_task.cancel()
     slack_task.cancel()
+    cicd_task.cancel()
     manager.shutdown_all()
 
 
@@ -488,6 +532,7 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         sub.send(_repos_event())
         sub.send(_slack_event())
         sub.send(_automations_event())
+        sub.send(_cicd_event())
         for ws in workspaces.list():
             run = ws.run
             if run and run.task and not run.task.done():
@@ -607,8 +652,81 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         hub.send(_automations_event())
         return
 
+    # ── CI/CD domain → TeamCity subdomain (IAP-fronted; calls run via to_thread) ─
+    if mtype == "set_teamcity_config":
+        teamcity_service.set_config(url=msg.get("url"), token=msg.get("token"),
+                                    client_id=msg.get("clientId"),
+                                    client_secret=msg.get("clientSecret"))
+        hub.send(_cicd_event())   # configured/url flags — never the token/secret
+        return
+
+    if mtype == "connect_teamcity":
+        async def _connect():
+            res = await asyncio.to_thread(teamcity_service.connect)  # opens browser
+            if not res.get("ok"):
+                sub.send({"type": "error", "message": f"TeamCity connect: {res.get('error')}"})
+            hub.send(_cicd_event())
+        asyncio.create_task(_connect())
+        return
+
+    if mtype == "teamcity_refresh":
+        async def _refresh_teamcity():
+            await asyncio.to_thread(teamcity_service.refresh)
+            hub.send(_cicd_event())
+        asyncio.create_task(_refresh_teamcity())
+        return
+
+    if mtype == "teamcity_set_watched_branches":
+        # The UI's ref-counted union of open branch panels. Store it, then fetch +
+        # broadcast each immediately so a freshly-mounted panel doesn't wait a poll
+        # cycle; the poller keeps them live thereafter.
+        async def _set_watched():
+            watched = await asyncio.to_thread(
+                teamcity_service.set_watched_branches, msg.get("branches") or [])
+            for w in watched:
+                builds = await asyncio.to_thread(
+                    teamcity_service.branch_builds, w["branch"], w.get("repo", ""), 25)
+                hub.send({"type": "teamcity_branch_builds", "branch": w["branch"],
+                          "repo": w.get("repo", ""), "builds": builds})
+        asyncio.create_task(_set_watched())
+        return
+
+    if mtype == "teamcity_project_builds":
+        # On-demand: a project's recent builds (the global feed is Monolith-heavy,
+        # so quieter projects need their own fetch). Reply to the asking window.
+        async def _project_builds():
+            pid = msg.get("projectId")
+            builds = await asyncio.to_thread(teamcity_service.project_builds, pid, 50)
+            sub.send({"type": "teamcity_project_builds", "projectId": pid, "builds": builds})
+        asyncio.create_task(_project_builds())
+        return
+
+    if mtype in ("teamcity_trigger", "teamcity_cancel", "teamcity_rerun"):
+        async def _tc_write():
+            if mtype == "teamcity_trigger":
+                res = await asyncio.to_thread(teamcity_service.trigger,
+                                              msg.get("buildTypeId"), msg.get("branch"))
+            elif mtype == "teamcity_cancel":
+                res = await asyncio.to_thread(teamcity_service.cancel,
+                                              msg.get("buildId"), msg.get("state") or "")
+            else:
+                res = await asyncio.to_thread(teamcity_service.rerun, msg.get("buildId"))
+            if not res.get("ok"):
+                sub.send({"type": "error", "message": f"TeamCity: {res.get('error')}"})
+            await asyncio.to_thread(teamcity_service.refresh)   # reflect the change
+            hub.send(_cicd_event())
+        asyncio.create_task(_tc_write())
+        return
+
     if mtype == "set_pipeline":
         workspaces.set_pipeline(msg.get("workspace_id"), msg.get("dsl", ""))
+        hub.send(_workspace_list_event())
+        return
+
+    if mtype == "set_workspace_order":
+        # Decoupled tab ordering (drag-to-reorder). Persisted + broadcast so every
+        # window's tab order matches and survives reload/reconnect.
+        workspace_order.set(msg.get("order") or [])
         hub.send(_workspace_list_event())
         return
 

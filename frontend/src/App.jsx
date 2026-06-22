@@ -15,12 +15,13 @@ import WorkspaceTabBar from "./components/WorkspaceTabBar.jsx";
 import SharedNodeView from "./components/SharedNodeView.jsx";
 import PullRequestsDashboard from "./components/PullRequestsDashboard.jsx";
 import SlackDashboard from "./components/SlackDashboard.jsx";
+import CICDDashboard from "./components/CICDDashboard.jsx";
 
 export default function App() {
-  const { status, tabs, activeTabId, workspaces, activeWorkspaceId, kinds, closeBlocked, toasts,
+  const { status, tabs, activeTabId, workspaces, workspaceOrder, activeWorkspaceId, kinds, closeBlocked, toasts,
           prs, prsViewer, prsLoading, prsError, prsUpdatedAt, appFx,
           repos, repoRoots, slack, slackMessages, slackMentions, newWorkspace,
-          automations, automationKinds } = useSyncExternalStore(subscribe, getSnapshot);
+          automations, automationKinds, cicd, teamcityProjectBuilds } = useSyncExternalStore(subscribe, getSnapshot);
   // A shared deep-link (/shared/workspace/{wid}/t/{nodeId}) just selects the
   // Share view with this target; no separate page.
   const shareTarget = useMemo(() => {
@@ -84,6 +85,10 @@ export default function App() {
   // How many workspaces are mid-run — drives the Pipeline tab's "live" badge, so a
   // background automation run is discoverable even when its tab isn't focused.
   const runningCount = useMemo(() => workspaces.filter(w => w.status === "running").length, [workspaces]);
+  // Live TeamCity builds — drives the CI/CD tab's badge, same idea as the Pipeline one.
+  const cicdRunning = useMemo(
+    () => (cicd?.teamcity?.builds || []).filter(b => b.state === "running" || b.state === "queued").length,
+    [cicd]);
   const onWorkOnPr = (pr) => {
     const local = repos.find(r => r.name.toLowerCase() === (pr.repo || "").toLowerCase());
     if (!local) return;
@@ -142,6 +147,15 @@ export default function App() {
           >
             Slack
           </button>
+          <button
+            className={`toggle-btn ${view === "cicd" ? "active" : ""}`}
+            onClick={() => setView("cicd")}
+          >
+            CI/CD
+            {cicdRunning > 0 && (
+              <span className="run-indicator" title={`${cicdRunning} build${cicdRunning > 1 ? "s" : ""} running`}>{cicdRunning}</span>
+            )}
+          </button>
         </div>
 
         <button onClick={() => activeTabId && restartTab(activeTabId)}>
@@ -172,7 +186,7 @@ export default function App() {
           className="pipeline-view-wrap"
           style={{ display: view === "pipeline" ? "flex" : "none" }}
         >
-          <WorkspaceTabBar workspaces={workspaces} activeWorkspaceId={activeWorkspaceId} kinds={kinds} closeBlocked={closeBlocked} newWorkspace={newWorkspace} repos={repos} />
+          <WorkspaceTabBar workspaces={workspaces} order={workspaceOrder} activeWorkspaceId={activeWorkspaceId} kinds={kinds} closeBlocked={closeBlocked} newWorkspace={newWorkspace} repos={repos} />
           <div className="ws-panels">
             {workspaces.length === 0 ? (
               <div className="ws-empty">Create a session (+) to define and run a pipeline.</div>
@@ -230,29 +244,39 @@ export default function App() {
         </div>
 
         <div
+          className="cicd-view-wrap"
+          style={{ display: view === "cicd" ? "flex" : "none" }}
+        >
+          <CICDDashboard cicd={cicd} teamcityProjectBuilds={teamcityProjectBuilds} />
+        </div>
+
+        <div
           className="terminal-view"
           style={{ display: view === "terminal" ? "flex" : "none" }}
         >
-          <div className="main-pane">
-            {tabs.map((tab) => (
-              <TabStage key={tab.id} tab={tab} active={tab.id === activeTabId} />
-            ))}
+          <div className="terminal-panes">
+            <div className="main-pane">
+              {tabs.map((tab) => (
+                <TabStage key={tab.id} tab={tab} active={tab.id === activeTabId} />
+              ))}
+            </div>
+            <div className="mirror-pane">
+              <div className="mirror-label">Mirror (read-only)</div>
+              {tabs.map((tab) => (
+                <TabStage
+                  key={tab.id}
+                  tab={tab}
+                  active={tab.id === activeTabId}
+                  isMirror
+                />
+              ))}
+            </div>
           </div>
-          <div className="mirror-pane">
-            <div className="mirror-label">Mirror (read-only)</div>
-            {tabs.map((tab) => (
-              <TabStage
-                key={tab.id}
-                tab={tab}
-                active={tab.id === activeTabId}
-                isMirror
-              />
-            ))}
-          </div>
+          {/* Command input lives under the terminal, only on the Terminal tab —
+              so other views (pipeline, CI/CD, slack) reclaim the vertical space. */}
+          <InputBar />
         </div>
       </div>
-
-      <InputBar />
 
       {toasts.length > 0 && (
         <div className="toasts">

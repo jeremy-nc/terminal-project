@@ -29,3 +29,5 @@ workspaces.json
 slack.json
 repos.json
 automations.json
+teamcity.json
+workspace_order.json

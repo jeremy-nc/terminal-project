@@ -1418,9 +1418,20 @@ html, body { background: var(--bg); }
   88%  { transform: translate(-1px, 1px); }
 }
 
+/* Rave smoke machine — full-screen WebGL haze (RaveSmoke). Above app content,
+   below toasts so notifications stay legible; never intercepts input. */
+.fx-rave-smoke {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 1500;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .appfx-overlay, .app.fx-shake { animation: none !important; }
-  .appfx-overlay { display: none; }
+  .appfx-overlay, .fx-rave-smoke { display: none; }
 }
 
 /* ── repos dropdown (next to the connection indicator) ──────────────────── */

@@ -24,9 +24,17 @@ export const APP_FX_TYPES = {
   "cursor-orbs": {
     duration: 2400,
   },
+  // Heavy nightclub/warehouse-rave smoke machine: full-screen volumetric haze
+  // (WebGL fbm fog, rendered by RaveSmoke). One-shot over `duration` — the
+  // component ramps density up FAST, holds heavy, then dissipates SLOWLY before
+  // auto-removal. (Component FX.)
+  "rave-smoke": {
+    duration: 15000,
+  },
 };
 
 /** Which FX fire when a view opens — a single type or a combination (array). */
 export const VIEW_FX = {
   pulls: ["anime-flash", "cursor-orbs"],
+  cicd: "rave-smoke",
 };

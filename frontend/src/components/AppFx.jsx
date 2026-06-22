@@ -2,10 +2,12 @@ import React from "react";
 import { createPortal } from "react-dom";
 import { APP_FX_TYPES } from "../appFx.js";
 import CursorOrbs from "./CursorOrbs.jsx";
+import RaveSmoke from "./RaveSmoke.jsx";
 
 // Component-FX renderers (canvas/JS). Layer-FX (CSS) fall through to the overlay.
 const FX_COMPONENTS = {
   "cursor-orbs": CursorOrbs,
+  "rave-smoke": RaveSmoke,
 };
 
 /** Renders one active whole-app FX, portaled to <body> so it always overlays the

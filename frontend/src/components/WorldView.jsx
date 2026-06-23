@@ -101,28 +101,31 @@ const WALL_H = 3.2;      // wall height
 const WALL_T = 0.18;     // wall thickness
 const DOOR_W = 2.4;      // door opening width
 const DOOR_H = 2.4;      // door opening height
-const D = 7;             // hub-to-room distance along an axis
+const D = 10;            // hub-to-room distance — wide enough that the diagonal corner
+                         // lanes (√2·|D−8| ≈ 2.8) stay open to walk out to the island
 const EYE = 1.6;         // camera/eye height
 
 // Room slots around the hub, growing per the mock: W, E, N, S, then stacked.
 // door = which local wall holds the door (faces the hub). +X=E, -X=W, -Z=N, +Z=S.
+const GAP = 2.5;             // breathing room between adjacent rooms
+const STACK = ROOM + GAP;    // center-to-center for stacked rooms (so they don't touch)
 const SLOTS = [
   { x: -D, z: 0, door: "E" },
   { x: D, z: 0, door: "W" },
   { x: 0, z: -D, door: "S" },
   { x: 0, z: D, door: "N" },
-  { x: -D, z: -ROOM, door: "E" },
-  { x: D, z: -ROOM, door: "W" },
-  { x: -D, z: ROOM, door: "E" },
-  { x: D, z: ROOM, door: "W" },
-  { x: 0, z: -D - ROOM, door: "S" },
-  { x: 0, z: D + ROOM, door: "N" },
+  { x: -D, z: -STACK, door: "E" },
+  { x: D, z: -STACK, door: "W" },
+  { x: -D, z: STACK, door: "E" },
+  { x: D, z: STACK, door: "W" },
+  { x: 0, z: -D - STACK, door: "S" },
+  { x: 0, z: D + STACK, door: "N" },
 ];
 function slotFor(i) {
   if (i < SLOTS.length) return SLOTS[i];
   // fallback ring for overflow
   const a = (i * Math.PI * 2) / 12;
-  return { x: Math.round(Math.cos(a) * (D + ROOM)), z: Math.round(Math.sin(a) * (D + ROOM)), door: "S" };
+  return { x: Math.round(Math.cos(a) * (D + STACK)), z: Math.round(Math.sin(a) * (D + STACK)), door: "S" };
 }
 
 const STATUS_STYLE = {
@@ -581,6 +584,62 @@ function makeClaude() {
   return { group: g, legs };
 }
 
+// A cavernous version of the island palms: a broad SINGLE trunk that's hollow,
+// with an arched doorway cut out (facing `entranceAngle`) and a dark interior you
+// can walk into — topped with the same drooping frond crown as makePalm().
+// Returns { group, walls } — walls are LOCAL XZ AABBs the caller offsets to world.
+function makeCavernTree(entranceAngle) {
+  const g = new THREE.Group();
+  const walls = [];
+  const H = 5.2, rB = 1.5, rT = 1.2, DOOR = 1.05;   // trunk height, radii, doorway angle
+  const bark = new THREE.MeshStandardMaterial({ color: 0x9c7a4d, roughness: 0.9, side: THREE.DoubleSide });
+  const dark = new THREE.MeshStandardMaterial({ color: 0x130d08, roughness: 1, side: THREE.DoubleSide });
+
+  // Hollow trunk = a gapped (partial) cylinder; the gap, centred on entranceAngle,
+  // is the doorway. A dark inner shell makes the inside read dark.
+  const start = entranceAngle + DOOR / 2, span = Math.PI * 2 - DOOR;
+  const outer = new THREE.Mesh(new THREE.CylinderGeometry(rT, rB, H, 28, 1, true, start, span), bark);
+  outer.position.y = H / 2; g.add(outer);
+  const inner = new THREE.Mesh(new THREE.CylinderGeometry(rT - 0.12, rB - 0.12, H - 0.04, 28, 1, true, start, span), dark);
+  inner.position.y = H / 2; g.add(inner);
+
+  // Arch header: a short cylinder slice filling the TOP of the doorway, so the
+  // opening only reaches partway up → an arch rather than a full-height slot.
+  const archH = H * 0.6, rA = rB + (rT - rB) * 0.6;
+  const header = new THREE.Mesh(
+    new THREE.CylinderGeometry(rA - 0.04, rA, H - archH, 12, 1, true, entranceAngle - DOOR / 2, DOOR), bark);
+  header.position.y = (archH + H) / 2; g.add(header);
+
+  // Cap the top + a dark ceiling so it's enclosed and dark inside.
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(rT + 0.06, rT + 0.06, 0.4, 28), bark);
+  cap.position.y = H; g.add(cap);
+  const ceil = new THREE.Mesh(new THREE.CircleGeometry(rT - 0.1, 28), dark);
+  ceil.rotation.x = Math.PI / 2; ceil.position.y = H - 0.06; g.add(ceil);
+
+  // Frond crown on top (matches the island palms, scaled up).
+  const leafMat = new THREE.MeshStandardMaterial({ color: 0x2f9e4f, roughness: 0.7, side: THREE.DoubleSide });
+  const frondGeo = new THREE.PlaneGeometry(4.6, 1.3); frondGeo.translate(2.3, 0, 0);
+  const crown = new THREE.Group(); crown.position.y = H + 0.3;
+  const NF = 9;
+  for (let i = 0; i < NF; i++) {
+    const leaf = new THREE.Mesh(frondGeo, leafMat);
+    leaf.rotation.y = (i / NF) * Math.PI * 2; leaf.rotation.z = -0.32;
+    crown.add(leaf);
+  }
+  g.add(crown);
+
+  // Collision: a ring of small boxes around the trunk, skipping the doorway arc.
+  const Rc = (rB + rT) / 2, Nc = 18;
+  for (let i = 0; i < Nc; i++) {
+    const th = (i / Nc) * Math.PI * 2;
+    const d = Math.atan2(Math.sin(th - entranceAngle), Math.cos(th - entranceAngle));
+    if (Math.abs(d) < DOOR / 2 + 0.12) continue;   // leave the doorway walkable
+    const x = Math.cos(th) * Rc, z = Math.sin(th) * Rc, e = 0.36;
+    walls.push({ minX: x - e, maxX: x + e, minZ: z - e, maxZ: z + e });
+  }
+  return { group: g, walls };
+}
+
 function buildRoom(stage, slot, mat, roofMat, floorMat, tabId) {
   const g = new THREE.Group();
   g.position.set(slot.x, 0, slot.z);
@@ -665,13 +724,18 @@ function buildRoom(stage, slot, mat, roofMat, floorMat, tabId) {
   return { group: g, led, walls, screen };
 }
 
-export default function WorldView({ stages, workspaceId }) {
+export default function WorldView({ stages, workspaceId, onPortal, spawn }) {
   const hostRef = useRef(null);
   const stagesRef = useRef(stages);
   stagesRef.current = stages;
   const wsRef = useRef(workspaceId);
   wsRef.current = workspaceId;
   const S = useRef({});
+  // Portal: walking into a cavern tree calls onPortal(role); a spawn signal
+  // ({tree, seq}) drops the camera at that tree's doorway (handled in the loop).
+  const portalRef = useRef(onPortal);
+  portalRef.current = onPortal;
+  useEffect(() => { if (spawn && spawn.seq != null) S.current.pendingSpawn = spawn; }, [spawn && spawn.seq]);
   // Which screen (tab id) keystrokes route to, or null = walk mode. The ref drives
   // the render loop / key handlers; the state drives the banner UI.
   const typingRef = useRef(null);
@@ -782,6 +846,29 @@ export default function WorldView({ stages, workspaceId }) {
     scene.add(claude.group);
     S.current.claude = claude;
 
+    // Two cavernous trees at polar-opposite points on the grass — walk inside them.
+    // On the diagonals (rooms sit on the axes) so they don't clash. Their colliders
+    // live in treeWalls (separate from per-stage room walls so they survive rebuilds).
+    // Each tree is a portal: the +π/4 one advances to the NEXT running workspace,
+    // the −π/4 one goes to the PREVIOUS. The door faces the island centre; the
+    // spawn pose is just OUTSIDE the door (centre side) so arriving doesn't instantly
+    // re-trigger, facing the hub.
+    const treeWalls = [], trees = [];
+    [["next", Math.PI / 4], ["prev", Math.PI / 4 + Math.PI]].forEach(([role, ang]) => {
+      const tr = 17, tx = Math.cos(ang) * tr, tz = Math.sin(ang) * tr;
+      const eA = Math.atan2(-tz, -tx);                       // doorway direction (toward centre)
+      const { group, walls } = makeCavernTree(eA);
+      group.position.set(tx, 0.05, tz);
+      scene.add(group);
+      for (const wl of walls) treeWalls.push({
+        minX: tx + wl.minX, maxX: tx + wl.maxX, minZ: tz + wl.minZ, maxZ: tz + wl.maxZ,
+      });
+      const sx = tx + Math.cos(eA) * 2.6, sz = tz + Math.sin(eA) * 2.6;   // emerge point
+      trees.push({ role, x: tx, z: tz, sx, sz, syaw: Math.atan2(sx, sz) });
+    });
+    S.current.treeWalls = treeWalls;
+    S.current.trees = trees;
+
     // Warm resort buildings: cream walls, thatched roofs, wooden floors.
     const wallMat = new THREE.MeshStandardMaterial({ color: 0xefe6d2, roughness: 0.9, metalness: 0.0 });
     const roofMat = new THREE.MeshStandardMaterial({ map: makeThatchTexture(), color: 0xb78f4c, roughness: 1 });
@@ -869,6 +956,15 @@ export default function WorldView({ stages, workspaceId }) {
       const speed = 5 * dt;
       const typing = !!typingRef.current;
 
+      // Portal spawn: a new {tree, seq} drops the camera at that tree's doorway.
+      const nowMs = performance.now();
+      const ps = S.current.pendingSpawn;
+      if (ps && ps.seq !== S.current.spawnApplied) {
+        S.current.spawnApplied = ps.seq;
+        const tt = (S.current.trees || []).find((t) => t.role === ps.tree);
+        if (tt) { camera.position.set(tt.sx, EYE, tt.sz); yaw = tt.syaw; pitch = 0; S.current.portalCd = nowMs + 900; }
+      }
+
       // Aim assist: while walking + locked, raycast the crosshair against the live
       // screens and remember the hit (also lights the crosshair). Range covers a
       // full room depth so you can trigger from the doorway, not just point-blank.
@@ -890,7 +986,7 @@ export default function WorldView({ stages, workspaceId }) {
         const dx = (fx * f + rx * r) * speed;
         const dz = (fz * f + rz * r) * speed;
         // Per-axis collision so you slide along walls; door gaps have no box.
-        const R = 0.35, walls = S.current.walls || [];
+        const R = 0.35, walls = (S.current.walls || []).concat(S.current.treeWalls || []);
         const hit = (px, pz) => {
           for (let i = 0; i < walls.length; i++) {
             const a = walls[i];
@@ -903,6 +999,19 @@ export default function WorldView({ stages, workspaceId }) {
       }
       camera.position.y = EYE;
       camera.rotation.set(pitch, yaw, 0, "YXZ");
+
+      // Portal entry: stepping inside a cavern tree navigates to another running
+      // workspace (next/prev). Cooldown avoids re-firing on the arrival spawn.
+      if (nowMs > (S.current.portalCd || 0) && portalRef.current) {
+        for (const tt of (S.current.trees || [])) {
+          const ex = camera.position.x - tt.x, ez = camera.position.z - tt.z;
+          if (ex * ex + ez * ez < 1.21) {     // inside the trunk (~1.1 radius)
+            S.current.portalCd = nowMs + 900;
+            portalRef.current(tt.role);
+            break;
+          }
+        }
+      }
 
       // Mirror live terminals onto room screens (throttled). Reveal the TV only
       // when a terminal exists at that tab id; hide it otherwise.

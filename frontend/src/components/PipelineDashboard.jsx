@@ -65,7 +65,7 @@ function NodeTerminal({ tabId, agentNodeId = null }) {
   return <div className="node-term-host" ref={hostRef} />;
 }
 
-export default function PipelineDashboard({ workspace, tabs }) {
+export default function PipelineDashboard({ workspace, tabs, onPortal, worldEntry }) {
   // Backend for this run's pipeline-node sessions: "bare" (plain PTY, "Default")
   // or "tmux". Per-panel, so each workspace remembers its own choice.
   const [backend, setBackend] = useState("bare");
@@ -76,6 +76,10 @@ export default function PipelineDashboard({ workspace, tabs }) {
   const [world, setWorld] = useState(false);
   const [worldMounted, setWorldMounted] = useState(false);
   const toggleWorld = () => setWorld((w) => { if (!w) setWorldMounted(true); return !w; });
+  // A portal into THIS workspace opens its 3D view (so you arrive in the world).
+  useEffect(() => {
+    if (worldEntry && worldEntry.workspaceId === workspace.id) { setWorldMounted(true); setWorld(true); }
+  }, [worldEntry, workspace.id]);
 
   // This panel renders exactly one workspace. App keeps every workspace's panel
   // mounted (hiding inactive via display:none) so node terminals are never
@@ -426,7 +430,13 @@ export default function PipelineDashboard({ workspace, tabs }) {
             </div>
             {worldMounted && (
               <div style={{ display: world ? "block" : "none" }}>
-                <WorldView stages={stages} workspaceId={active.id} />
+                <WorldView
+                  stages={stages}
+                  workspaceId={active.id}
+                  onPortal={onPortal}
+                  spawn={worldEntry && worldEntry.workspaceId === active.id
+                    ? { tree: worldEntry.tree, seq: worldEntry.seq } : null}
+                />
               </div>
             )}
           </div>

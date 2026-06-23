@@ -36,5 +36,5 @@ export const APP_FX_TYPES = {
 /** Which FX fire when a view opens — a single type or a combination (array). */
 export const VIEW_FX = {
   pulls: ["anime-flash", "cursor-orbs"],
-  cicd: "rave-smoke",
+  // cicd: "rave-smoke",   // disabled for now — RaveSmoke kept, just not auto-fired
 };

@@ -33,6 +33,10 @@ let _state = {
   // Decoupled tab order: [workspace_id] from the backend's WorkspaceOrder store,
   // reconciled against the live list. Drives tab order; Workspace has no order field.
   workspaceOrder: [],
+  // Set when a WorldView "portal" tree navigates to another workspace: { workspaceId,
+  // tree, seq }. The target's PipelineDashboard opens its 3D view and spawns the
+  // camera at `tree`. seq makes repeat portals to the same workspace re-fire.
+  worldEntry: null,
   // Workspace-kind manifest from the server: [{ id, label, fields }]. Drives the
   // create modal kind-agnostically (a new backend kind appears with no UI change).
   kinds: [],
@@ -862,6 +866,14 @@ export function selectWorkspace(wid) {
  *  stores + broadcasts it, so every window and a reload reflect the order. */
 export function setWorkspaceOrder(order) {
   _send({ type: "set_workspace_order", order });
+}
+
+// WorldView portal: select the target workspace AND signal its 3D view to open and
+// spawn the camera at `tree` (the exit cavern tree). seq re-fires on repeat portals.
+let _portalSeq = 0;
+export function portalToWorkspace(targetId, tree) {
+  selectWorkspace(targetId);
+  _setState({ worldEntry: { workspaceId: targetId, tree, seq: ++_portalSeq } });
 }
 
 export function setWorkspaceDsl(wid, dsl) {

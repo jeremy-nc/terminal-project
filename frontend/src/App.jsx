@@ -2,7 +2,7 @@ import React, { useSyncExternalStore, useEffect, useState, useMemo } from "react
 import {
   subscribe, getSnapshot,
   newTab, activateTab, closeTab, restartTab, fitActive, refitNodes, dismissToast, playAppFx,
-  openNewWorkspace,
+  openNewWorkspace, portalToWorkspace,
 } from "./terminalController.js";
 import { APP_FX_TYPES, VIEW_FX } from "./appFx.js";
 import AppFx from "./components/AppFx.jsx";
@@ -21,7 +21,26 @@ export default function App() {
   const { status, tabs, activeTabId, workspaces, workspaceOrder, activeWorkspaceId, kinds, closeBlocked, toasts,
           prs, prsViewer, prsLoading, prsError, prsUpdatedAt, appFx,
           repos, repoRoots, slack, slackMessages, slackMentions, newWorkspace,
-          automations, automationKinds, cicd, teamcityProjectBuilds } = useSyncExternalStore(subscribe, getSnapshot);
+          automations, automationKinds, cicd, teamcityProjectBuilds, worldEntry } = useSyncExternalStore(subscribe, getSnapshot);
+
+  // WorldView portal: walking into a cavern tree jumps to the next/previous
+  // workspace that has a RUNNING session (wrapping; a lone one comes out the other
+  // tree). The destination's 3D view opens and the camera spawns at the exit tree.
+  const onPortal = (direction) => {
+    const order = workspaceOrder.length ? workspaceOrder : workspaces.map((w) => w.id);
+    const running = order.filter((id) => {
+      const w = workspaces.find((x) => x.id === id);
+      return w && w.status === "running";
+    });
+    if (running.length === 0) return;
+    let idx = running.indexOf(activeWorkspaceId);
+    if (idx === -1) idx = 0;
+    const t = direction === "next"
+      ? (idx + 1) % running.length
+      : (idx - 1 + running.length) % running.length;
+    // entering NEXT arrives "from a lower index" → emerge at the PREV tree (and vice versa)
+    portalToWorkspace(running[t], direction === "next" ? "prev" : "next");
+  };
   // A shared deep-link (/shared/workspace/{wid}/t/{nodeId}) just selects the
   // Share view with this target; no separate page.
   const shareTarget = useMemo(() => {
@@ -200,7 +219,7 @@ export default function App() {
                   className="ws-panel"
                   style={{ display: w.id === activeWorkspaceId ? "flex" : "none" }}
                 >
-                  <PipelineDashboard workspace={w} tabs={tabs} />
+                  <PipelineDashboard workspace={w} tabs={tabs} onPortal={onPortal} worldEntry={worldEntry} />
                 </div>
               ))
             )}

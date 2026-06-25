@@ -296,8 +296,8 @@ function _handleMsg(msg) {
       }
       const merged = defs.map((d) =>
         existing.has(d.id)
-          ? { ...existing.get(d.id), name: d.name, dir: d.dir, kind: d.kind, meta: d.meta, closing: d.closing }
-          : { id: d.id, name: d.name, dir: d.dir, dsl: d.dsl || "", kind: d.kind || "directory", meta: d.meta || {}, closing: d.closing, ..._blankRunState() }
+          ? { ...existing.get(d.id), name: d.name, dir: d.dir, kind: d.kind, meta: d.meta, theme: d.theme || "tropical", closing: d.closing }
+          : { id: d.id, name: d.name, dir: d.dir, dsl: d.dsl || "", kind: d.kind || "directory", meta: d.meta || {}, theme: d.theme || "tropical", closing: d.closing, ..._blankRunState() }
       );
       let active = msg.created || _state.activeWorkspaceId;
       if (!merged.find((w) => w.id === active)) {
@@ -871,6 +871,12 @@ export function selectWorkspace(wid) {
  *  stores + broadcasts it, so every window and a reload reflect the order. */
 export function setWorkspaceOrder(order) {
   _send({ type: "set_workspace_order", order });
+}
+
+/** Set a workspace's WorldView theme (persisted server-side). Choose while idle;
+ *  it applies when the 3D scene next builds. */
+export function setWorkspaceTheme(wid, theme) {
+  _send({ type: "set_workspace_theme", workspace_id: wid, theme });
 }
 
 // WorldView portal: select the target workspace AND signal its 3D view to open and

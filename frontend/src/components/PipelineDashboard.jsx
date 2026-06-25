@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { runWorkspace, cancelWorkspace, setWorkspaceDsl, mountNodeTerm, unmountTab } from "../terminalController.js";
+import { runWorkspace, cancelWorkspace, setWorkspaceDsl, setWorkspaceTheme, mountNodeTerm, unmountTab } from "../terminalController.js";
 import { parseDsl } from "../pipelineDsl.js";
 import { b64dec } from "../wire.js";
 import OpenInTerminalButton from "./OpenInTerminalButton.jsx";
 import CopyLinkButton from "./CopyLinkButton.jsx";
 import WorldView from "./WorldView.jsx";
+import { themeList } from "./world/themes/index.js";
 import TeamCityBranchBuilds from "./TeamCityBranchBuilds.jsx";
 
 // ── 3D-world stage helpers: one room per top-level pipeline stage ────────────
@@ -371,6 +372,22 @@ export default function PipelineDashboard({ workspace, tabs, onPortal, worldEntr
                 </label>
               ))}
             </div>
+            <div className="theme-select">
+              <span className="backend-label" title="3D WorldView theme — applies on the next run">World</span>
+              <select
+                className="theme-dropdown"
+                value={active.theme || "tropical"}
+                onChange={(e) => setWorkspaceTheme(active.id, e.target.value)}
+                disabled={running}
+                title={running
+                  ? "Stop the session to change the world theme"
+                  : "Choose a WorldView theme — applies on the next run"}
+              >
+                {themeList.map((t) => (
+                  <option key={t.id} value={t.id}>{t.label}</option>
+                ))}
+              </select>
+            </div>
             <button className="btn-run" onClick={handleRun} disabled={running}>
               {running ? "Running..." : "Run session"}
             </button>
@@ -433,6 +450,7 @@ export default function PipelineDashboard({ workspace, tabs, onPortal, worldEntr
                 <WorldView
                   stages={stages}
                   workspaceId={active.id}
+                  theme={active.theme || "tropical"}
                   onPortal={onPortal}
                   spawn={worldEntry && worldEntry.workspaceId === active.id
                     ? { tree: worldEntry.tree, seq: worldEntry.seq } : null}

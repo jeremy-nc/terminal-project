@@ -723,6 +723,11 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         hub.send(_workspace_list_event())
         return
 
+    if mtype == "set_workspace_theme":
+        workspaces.set_theme(msg.get("workspace_id"), msg.get("theme", "tropical"))
+        hub.send(_workspace_list_event())
+        return
+
     if mtype == "set_workspace_order":
         # Decoupled tab ordering (drag-to-reorder). Persisted + broadcast so every
         # window's tab order matches and survives reload/reconnect.

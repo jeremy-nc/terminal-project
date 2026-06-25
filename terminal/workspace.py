@@ -21,11 +21,12 @@ from .workspace_kinds import get_kind
 
 class Workspace:
     def __init__(self, id: str, name: str, dir: str, dsl: str = "",
-                 kind: str = "directory", meta: dict = None):
+                 kind: str = "directory", meta: dict = None, theme: str = "tropical"):
         self.id = id
         self.name = name
         self.dir = dir          # EFFECTIVE working directory (a kind's prepared cwd)
         self.dsl = dsl          # side-panel pipeline source
+        self.theme = theme or "tropical"   # WorldView 3D theme (presentation only)
         # How the dir was provisioned ("directory" | "worktree" | …) and the
         # kind-specific details (repo, branch, worktree_path) used for cleanup.
         self.kind = kind or "directory"
@@ -38,12 +39,13 @@ class Workspace:
     def to_json(self) -> dict:
         """The persisted definition subset (run context is transient)."""
         return {"id": self.id, "name": self.name, "dir": self.dir, "dsl": self.dsl,
-                "kind": self.kind, "meta": self.meta}
+                "kind": self.kind, "meta": self.meta, "theme": self.theme}
 
     @classmethod
     def from_json(cls, d: dict) -> "Workspace":
         return cls(d["id"], d.get("name", ""), d.get("dir", ""), d.get("dsl", ""),
-                   kind=d.get("kind", "directory"), meta=d.get("meta") or {})
+                   kind=d.get("kind", "directory"), meta=d.get("meta") or {},
+                   theme=d.get("theme", "tropical"))
 
 
 class WorkspaceStore:
@@ -114,6 +116,13 @@ class WorkspaceStore:
         ws = self._workspaces.get(wid)
         if ws is not None:
             ws.dsl = dsl
+            self._save()
+        return ws
+
+    def set_theme(self, wid: str, theme: str):
+        ws = self._workspaces.get(wid)
+        if ws is not None:
+            ws.theme = theme or "tropical"
             self._save()
         return ws
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from "react";
+import React, { useState, useEffect, useMemo, useRef } from "react";
 import { createWorkspace, selectWorkspace, clearCloseBlocked, openNewWorkspace, closeNewWorkspace, setWorkspaceOrder } from "../terminalController.js";
 import NewWorkspaceModal from "./NewWorkspaceModal.jsx";
 import CloseWorkspaceModal from "./CloseWorkspaceModal.jsx";
@@ -12,6 +12,20 @@ export default function WorkspaceTabBar({ workspaces, order = [], activeWorkspac
   const [closingId, setClosingId] = useState(null);
   const [dragId, setDragId] = useState(null);     // workspace id being dragged
   const [overId, setOverId] = useState(null);     // tab currently hovered as drop target
+  const tabsRef = useRef(null);
+
+  // When the active workspace changes (e.g. a portal jump), if its tab is scrolled
+  // off-screen, scroll the bar so it sits against the left edge.
+  useEffect(() => {
+    const c = tabsRef.current;
+    const el = c && c.querySelector(".ws-tab.active");
+    if (!el) return;
+    const cRect = c.getBoundingClientRect(), eRect = el.getBoundingClientRect();
+    if (eRect.left < cRect.left || eRect.right > cRect.right) {
+      const padLeft = parseFloat(getComputedStyle(c).paddingLeft) || 0;
+      c.scrollTo({ left: c.scrollLeft + (eRect.left - cRect.left - padLeft), behavior: "smooth" });
+    }
+  }, [activeWorkspaceId]);
 
   // Render in the server's reconciled order, falling back to append for any id
   // not yet in the order (race-safe).
@@ -49,7 +63,7 @@ export default function WorkspaceTabBar({ workspaces, order = [], activeWorkspac
   const endClose = () => { clearCloseBlocked(); setClosingId(null); };
 
   return (
-    <div className="ws-tabs">
+    <div className="ws-tabs" ref={tabsRef}>
       {ordered.map((w) => (
         <div
           key={w.id}

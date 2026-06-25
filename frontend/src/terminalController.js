@@ -300,7 +300,12 @@ function _handleMsg(msg) {
           : { id: d.id, name: d.name, dir: d.dir, dsl: d.dsl || "", kind: d.kind || "directory", meta: d.meta || {}, closing: d.closing, ..._blankRunState() }
       );
       let active = msg.created || _state.activeWorkspaceId;
-      if (!merged.find((w) => w.id === active)) active = merged[0]?.id ?? null;
+      if (!merged.find((w) => w.id === active)) {
+        // Default to the FIRST tab in the displayed (reconciled) order — not the
+        // workspace store's insertion order — so a refresh opens the leading tab.
+        const ordered = (msg.order || []).filter((id) => merged.some((w) => w.id === id));
+        active = ordered[0] ?? merged[0]?.id ?? null;
+      }
       // Clear a stale block once its workspace is gone.
       const blocked = _state.closeBlocked && merged.find((w) => w.id === _state.closeBlocked.workspaceId)
         ? _state.closeBlocked : null;

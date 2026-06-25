@@ -2,6 +2,7 @@
 import fcntl
 import os
 import pty
+import pwd
 import shutil
 import struct
 import sys
@@ -43,7 +44,17 @@ def fork_pty(argv: list, cols: int, rows: int, cwd: str = None) -> tuple:
 
 
 def resolve_shell(name: str) -> list:
-    """Resolve a requested shell name to an argv list, falling back to bash."""
+    """Resolve a requested shell name to an argv list, falling back to bash.
+
+    For an interactive shell, use the user's LOGIN shell from their OS account
+    (e.g. /bin/zsh) — correct regardless of how this server was launched. ($SHELL
+    only reflects the launching process's shell, so a server started from bash
+    would otherwise spawn bash and miss the user's zsh config.)"""
     if name == "claude" and shutil.which("claude"):
         return ["claude"]
-    return [os.environ.get("SHELL") or "bash"]
+    shell = None
+    try:
+        shell = pwd.getpwuid(os.getuid()).pw_shell    # the account's configured login shell
+    except (KeyError, OSError):
+        pass
+    return [shell or os.environ.get("SHELL") or "bash"]

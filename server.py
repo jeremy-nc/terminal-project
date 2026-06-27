@@ -48,7 +48,7 @@ from repos import RepoIndex
 from slack import SlackService
 from automations import AutomationStore, automation_kinds_manifest
 from cicd import TeamCityService
-from docs import DocsService
+from docs_explorer import DocsService
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "frontend", "dist")

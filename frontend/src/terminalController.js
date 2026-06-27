@@ -74,6 +74,7 @@ let _state = {
                       hasOauthClient: false, hasCreds: false, builds: [], projects: [], error: null } },
   teamcityProjectBuilds: {},   // projectId -> recent builds (on-demand, picker selection)
   teamcityBranchBuilds: {},    // branch -> recent builds (poller-fed; per-workspace branch panel)
+  docsTrees: {},               // docs-dir -> { tree, exists } (FS-watcher-fed; per-workspace docs panel)
   // Active whole-app animations: [{ type, key }]. Several can run at once so a
   // view/action can fire a combination of effects. <AppFx/> renders each.
   appFx: [],
@@ -184,6 +185,8 @@ function _connect() {
     // Re-register any open branch panels — the backend's watched set is in-memory
     // and is lost across a server restart/reconnect.
     if (_branchWatchers.size) _sendWatchedBranches();
+    // Same for open docs-explorer panels — the backend's watcher set is in-memory.
+    if (_docsWatchers.size) _sendWatchedDocs();
     // Reconnect: re-subscribe any already-mounted terminals (reset first so the
     // replay doesn't duplicate what's already on screen).
     for (const tabId of _terms.keys()) {
@@ -366,6 +369,10 @@ function _handleMsg(msg) {
     case "teamcity_branch_builds": {
       const key = teamcityBranchKey(msg.repo, msg.branch);
       _setState({ teamcityBranchBuilds: { ..._state.teamcityBranchBuilds, [key]: msg.builds || [] } });
+      break;
+    }
+    case "docs_tree": {
+      _setState({ docsTrees: { ..._state.docsTrees, [msg.dir]: { tree: msg.tree || [], exists: !!msg.exists } } });
       break;
     }
     case "workspace_ensured": {
@@ -753,6 +760,24 @@ export function unwatchTeamCityBranch(repo, branch) {
   e.count -= 1;
   if (e.count <= 0) { _branchWatchers.delete(key); _sendWatchedBranches(); }
 }
+// Docs-explorer panels are ref-counted by their docs directory (the same dir can be
+// shown by several panels): N mounted panels keep the backend's FS watcher for that
+// dir exactly once; it drops out of the watched set when the last unmounts.
+const _docsWatchers = new Map();   // dir -> count
+function _sendWatchedDocs() { _send({ type: "docs_set_watched", dirs: [..._docsWatchers.keys()] }); }
+export function watchDocs(dir) {
+  if (!dir) return;
+  const c = _docsWatchers.get(dir) || 0;
+  _docsWatchers.set(dir, c + 1);
+  if (c === 0) _sendWatchedDocs();
+}
+export function unwatchDocs(dir) {
+  if (!dir) return;
+  const c = _docsWatchers.get(dir) || 0;
+  if (c <= 1) { _docsWatchers.delete(dir); _sendWatchedDocs(); }
+  else _docsWatchers.set(dir, c - 1);
+}
+
 export function triggerTeamCityBuild(buildTypeId, branch) { _send({ type: "teamcity_trigger", buildTypeId, branch }); }
 export function cancelTeamCityBuild(buildId, state) { _send({ type: "teamcity_cancel", buildId, state }); }
 export function rerunTeamCityBuild(buildId) { _send({ type: "teamcity_rerun", buildId }); }

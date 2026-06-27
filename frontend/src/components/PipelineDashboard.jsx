@@ -7,6 +7,8 @@ import CopyLinkButton from "./CopyLinkButton.jsx";
 import WorldView from "./WorldView.jsx";
 import { themeList } from "./world/themes/index.js";
 import TeamCityBranchBuilds from "./TeamCityBranchBuilds.jsx";
+import RepoBranchLinkPanel from "./RepoBranchLinkPanel.jsx";
+import DocsExplorer from "./DocsExplorer.jsx";
 
 // ── 3D-world stage helpers: one room per top-level pipeline stage ────────────
 function stageLabel(node) {
@@ -357,6 +359,7 @@ export default function PipelineDashboard({ workspace, tabs, onPortal, worldEntr
               spellCheck="false"
               placeholder="seq: claude -p &quot;…&quot;"
             />
+            <DocsExplorer baseDir={active.dir} />
             <div className="backend-select" role="radiogroup" aria-label="Terminal backend">
               <span className="backend-label">Terminal</span>
               {[["bare", "Default"], ["tmux", "tmux"]].map(([value, label]) => (
@@ -493,6 +496,8 @@ export default function PipelineDashboard({ workspace, tabs, onPortal, worldEntr
             )}
           </div>
         </div>
+        {/* GitHub links for a worktree's repo/branch + matching PR; hides if unresolved. */}
+        <RepoBranchLinkPanel repo={active?.meta?.repo} branch={branch} />
         {/* Branch-scoped TeamCity builds (bottom ~⅓); hides itself for non-git workspaces. */}
         <TeamCityBranchBuilds branch={branch} repo={active?.meta?.repo || ""} />
       </div>

@@ -48,6 +48,7 @@ from repos import RepoIndex
 from slack import SlackService
 from automations import AutomationStore, automation_kinds_manifest
 from cicd import TeamCityService
+from docs import DocsService
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 DIST = os.path.join(HERE, "frontend", "dist")
@@ -134,6 +135,7 @@ slack_service = SlackService(SLACK_FILE)  # Slack client (token from slack.json 
 automation_store = AutomationStore(AUTOMATIONS_FILE)  # PR→workspace rules (frontend-evaluated)
 teamcity_service = TeamCityService(TEAMCITY_FILE)  # CI/CD domain → TeamCity subdomain (IAP-fronted)
 hub = Hub()
+docs_service = DocsService(hub.send)  # Docs File Explorer: per-dir FS watchers, ref-counted by the UI
 
 # Shared interactive-terminal registry (the Terminal-view tabs), mirrored to all
 # windows. Each entry's id is a live PTY session owned by `manager`.
@@ -195,7 +197,7 @@ def _workspace_list_event(created: str = None) -> dict:
     }
 
 
-PR_POLL_INTERVAL = 180  # seconds — refresh the PR inbox every 3 minutes
+PR_POLL_INTERVAL = 20  # seconds — same cadence as the CI/CD (TeamCity) feed below
 
 
 async def _poll_pulls():
@@ -265,6 +267,7 @@ async def _poll_cicd():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     manager.loop = asyncio.get_running_loop()
+    docs_service.set_loop(manager.loop)   # FS-watcher events marshal onto this loop
     # Kill any stale tmux server so sessions started by this run pick up the
     # current tmux.conf (tmux only reads its config when the server starts).
     manager.reset_backend()
@@ -275,6 +278,7 @@ async def lifespan(app: FastAPI):
     pulls_task.cancel()
     slack_task.cancel()
     cicd_task.cancel()
+    docs_service.stop_all()   # tear down all FS watchers + the observer thread
     manager.shutdown_all()
 
 
@@ -691,6 +695,13 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         asyncio.create_task(_set_watched())
         return
 
+    if mtype == "docs_set_watched":
+        # The UI's ref-counted union of open docs-explorer directories. Mirror it: start
+        # an FS watcher per new dir (off-loop — set_watched does filesystem I/O) and
+        # broadcast each new dir's tree; watchers fire further updates on OS events.
+        asyncio.create_task(asyncio.to_thread(docs_service.set_watched, msg.get("dirs") or []))
+        return
+
     if mtype == "teamcity_project_builds":
         # On-demand: a project's recent builds (the global feed is Monolith-heavy,
         # so quieter projects need their own fetch). Reply to the asking window.
@@ -960,6 +971,9 @@ async def ws_endpoint(ws: WebSocket):
         manager.detach(sub)
         drain.cancel()
         if hub.empty():
+            # No windows left: drop all docs FS watchers (the UI re-registers its open
+            # panels on reconnect, same as the TeamCity watched set).
+            docs_service.set_watched([])
             for ws in workspaces.list():
                 run = ws.run
                 if run and run.task and not run.task.done():

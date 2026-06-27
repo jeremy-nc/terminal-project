@@ -873,6 +873,23 @@ html, body { background: var(--bg); }
   outline: none;
 }
 .dsl-editor:focus { border-color: var(--accent); }
+/* Live docs file explorer in the sidebar, below the DSL editor. Shares the flexible
+   space with the textarea (DSL on top, docs below) and scrolls its own tree. */
+.docs-explorer {
+  flex: 1; min-height: 90px;
+  display: flex; flex-direction: column; gap: 8px;
+  border-top: 1px solid var(--border); padding-top: 12px;
+}
+.docs-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.docs-path { font-size: 11px; color: var(--text-muted); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; }
+.docs-tree { flex: 1; min-height: 0; overflow-y: auto; font-size: 12.5px; }
+.docs-row { display: flex; align-items: center; gap: 6px; padding: 2px 4px; border-radius: 4px; white-space: nowrap; color: var(--text-muted); }
+.docs-row.dir { cursor: pointer; user-select: none; }
+.docs-row:hover { background: var(--surface-hover, rgba(255,255,255,0.05)); }
+.docs-caret { width: 10px; flex: none; color: var(--text-faint); font-size: 9px; text-align: center; }
+.docs-ic { flex: none; font-size: 12px; }
+.docs-name { overflow: hidden; text-overflow: ellipsis; }
+.docs-size { margin-left: auto; padding-left: 8px; color: var(--text-faint); font-size: 10.5px; }
 /* Terminal-backend radio group above Run Pipeline. */
 .backend-select {
   display: flex;
@@ -981,6 +998,40 @@ html, body { background: var(--bg); }
   border-top: 1px solid var(--border);
   padding-top: 12px;
 }
+/* GitHub repo link panel, above the TeamCity builds. */
+.repo-link {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 12px;
+}
+.repo-link-row {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 7px; border-radius: 5px;
+  font-size: 12.5px; color: var(--text); text-decoration: none;
+  border: 1px solid var(--border); background: var(--bg);
+}
+.repo-link-row:hover { border-color: var(--accent); }
+.repo-gh {
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--text-faint); border: 1px solid var(--border); border-radius: 4px; padding: 1px 5px;
+}
+.repo-name { color: var(--accent); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repo-branch { font-family: var(--mono); color: var(--text-muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repo-pr {
+  font-size: 11px; font-weight: 600; white-space: nowrap;
+  color: #a371f7; border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px;
+}
+.repo-pr-title { flex: 1; min-width: 0; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.repo-ci { flex: none; font-size: 10.5px; font-weight: 600; white-space: nowrap; padding: 1px 8px; border-radius: 999px; }
+.repo-ci.ok { background: rgba(76,175,114,0.16); color: #6ee29a; }
+.repo-ci.bad { background: rgba(255,107,107,0.16); color: #ff9b9b; }
+.repo-ci.run { background: rgba(108,154,231,0.18); color: #7fb0ff; animation: run-pulse 1.8s ease-out infinite; }
+.repo-ci.queue { background: rgba(217,177,68,0.16); color: #e3c569; }
+.repo-ci.muted { background: var(--bg-alt, #131318); color: var(--text-muted, #9a9aa3); }
+.repo-ext { margin-left: auto; color: var(--text-faint); }
 .tc-branch-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .tc-branch-name {
   font-size: 11px; color: var(--text-muted); background: var(--bg);

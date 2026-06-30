@@ -2,7 +2,7 @@ import React, { useSyncExternalStore, useEffect, useState, useMemo } from "react
 import {
   subscribe, getSnapshot,
   newTab, activateTab, closeTab, restartTab, fitActive, refitNodes, dismissToast, playAppFx,
-  openNewWorkspace, portalToWorkspace,
+  openNewWorkspace, portalToWorkspace, reportFocus,
 } from "./terminalController.js";
 import { APP_FX_TYPES, VIEW_FX } from "./appFx.js";
 import AppFx from "./components/AppFx.jsx";
@@ -20,8 +20,8 @@ import CICDDashboard from "./components/CICDDashboard.jsx";
 export default function App() {
   const { status, tabs, activeTabId, workspaces, workspaceOrder, activeWorkspaceId, kinds, closeBlocked, toasts,
           prs, prsViewer, prsLoading, prsError, prsUpdatedAt, appFx,
-          repos, repoRoots, slack, slackMessages, slackMentions, newWorkspace,
-          automations, automationKinds, cicd, teamcityProjectBuilds, worldEntry } = useSyncExternalStore(subscribe, getSnapshot);
+          repos, repoRoots, slack, slackMessages, slackMentions, slackSentiment, slackSentiments, newWorkspace,
+          automations, automationKinds, cicd, teamcityProjectBuilds, worldEntry, presence } = useSyncExternalStore(subscribe, getSnapshot);
 
   // WorldView portal: walking into a cavern tree jumps to the next/previous
   // workspace that has a RUNNING session (wrapping; a lone one comes out the other
@@ -80,6 +80,12 @@ export default function App() {
     if (!fx) return;
     (Array.isArray(fx) ? fx : [fx]).forEach(playAppFx);
   }, [view]);
+
+  // Presence: report which world this window is in — the active workspace while on
+  // the pipeline view (where the WorldView renders), else nothing.
+  useEffect(() => {
+    reportFocus(view === "pipeline" ? activeWorkspaceId : null);
+  }, [view, activeWorkspaceId]);
 
   // A /pipeline/new-workspace link opens the create modal pre-filled, once. Tidy
   // the URL afterward so a refresh doesn't re-open it.
@@ -182,6 +188,11 @@ export default function App() {
         </button>
         {/* flexible space pushes these to the right: … Repo button | Open */}
         <ReposMenu repos={repos} roots={repoRoots} />
+        {presence.windows > 0 && (
+          <span className="presence-chip" title={`${presence.windows} window${presence.windows > 1 ? "s" : ""} connected`}>
+            ◉ {presence.windows}
+          </span>
+        )}
         <span className={`status status-${status}`}>{status}</span>
       </div>
 
@@ -259,7 +270,8 @@ export default function App() {
           className="slack-view-wrap"
           style={{ display: view === "slack" ? "flex" : "none" }}
         >
-          <SlackDashboard slack={slack} messages={slackMessages} mentions={slackMentions} />
+          <SlackDashboard slack={slack} messages={slackMessages} mentions={slackMentions}
+            sentiment={slackSentiment} sentiments={slackSentiments} />
         </div>
 
         <div

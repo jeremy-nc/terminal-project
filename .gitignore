@@ -27,6 +27,7 @@ workspaces.json
 
 # local secrets / machine-specific state (never commit)
 slack.json
+slack_sentiment.json
 repos.json
 automations.json
 teamcity.json

@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
-import { setSlackToken, setSlackApp, setSlackPolled, setSlackMultiplexers, refreshSlack, loadSlackMessages, loadSlackMentions, sendSlackMessage } from "../terminalController.js";
+import { setSlackToken, setSlackApp, setSlackPolled, setSlackMultiplexers, refreshSlack, loadSlackMessages, loadSlackMentions, sendSlackMessage, setSlackSentimentConfig } from "../terminalController.js";
+import SlackText from "./SlackText.jsx";
 
 /** Format a Slack ts ("1718800000.123456") as a short local time — just the time
  *  for today, date + time for older messages. */
@@ -51,7 +52,7 @@ function SlackMessages({ channel, items, selfPoll = true, teamUrl }) {
             <div className="slack-msg-meta"><b>{m.user || "?"}</b> <span className="slack-msg-time">{fmtTs(m.ts)}</span>
               {teamUrl && <a className="slack-msg-link" href={slackMsgLink(teamUrl, channel, m.ts)} target="_blank" rel="noreferrer" title="Open in Slack">↗</a>}
             </div>
-            <div className="slack-msg-text">{m.text}</div>
+            <div className="slack-msg-text"><SlackText text={m.text} /></div>
           </div>
         ))}
     </div>
@@ -74,17 +75,33 @@ function fmtBucket(start) {
 /** Read-only multiplexer: merges its channels' messages (from the polled map),
  *  sorts by time, and groups into hourly buckets — a #channel sub-label shows
  *  whenever the source changes. All merging is client-side. */
-function SlackMultiplexer({ mux, channels, messages, teamUrl }) {
+function SlackMultiplexer({ mux, channels, messages, teamUrl, sentiment, sentiments }) {
   const ref = useRef(null);
+  const [nameFilter, setNameFilter] = useState("");
   const byId = (id) => channels.find((c) => c.id === id) || null;
+
+  // slack→sentiment subdomain: the ✨ Smart toggle + "what matters to me" note are
+  // GLOBAL config (live in the store); only the note's local draft is component
+  // state, saved on blur/Enter so we don't send a config update per keystroke.
+  const smartOn = !!sentiment?.enabled;
+  const [noteDraft, setNoteDraft] = useState(sentiment?.note || "");
+  useEffect(() => { setNoteDraft(sentiment?.note || ""); }, [sentiment?.note]);
+  const saveNote = () => { if (noteDraft !== (sentiment?.note || "")) setSlackSentimentConfig({ note: noteDraft }); };
+  const sentOf = (m) => sentiments?.[`${m.channel}:${m.ts}`];
 
   const merged = [];
   for (const cid of mux.channels || []) for (const m of messages[cid] || []) merged.push({ ...m, channel: cid });
   merged.sort((a, b) => parseFloat(a.ts) - parseFloat(b.ts));
+  // Author-name filter: comma-separated terms, OR-matched as case-insensitive
+  // substrings — "Ke, Je" shows Kevin, Kelly, Jeremy, Jerome…
+  const terms = nameFilter.toLowerCase().split(",").map((t) => t.trim()).filter(Boolean);
+  const visible = terms.length
+    ? merged.filter((m) => { const u = (m.user || "").toLowerCase(); return terms.some((t) => u.includes(t)); })
+    : merged;
 
   const buckets = [];
   let cur = null;
-  for (const m of merged) {
+  for (const m of visible) {
     const d = new Date(parseFloat(m.ts) * 1000);
     const key = `${d.toDateString()} ${d.getHours()}`;
     if (!cur || cur.key !== key) {
@@ -95,34 +112,62 @@ function SlackMultiplexer({ mux, channels, messages, teamUrl }) {
     cur.msgs.push(m);
   }
 
-  useLayoutEffect(() => { const el = ref.current; if (el) el.scrollTop = el.scrollHeight; }, [merged.length]);
+  useLayoutEffect(() => { const el = ref.current; if (el) el.scrollTop = el.scrollHeight; }, [visible.length]);
 
   if (!(mux.channels || []).length)
     return <div className="slack-empty slack-empty-center">Drag channels onto this multiplexer (sidebar or the bar above) to combine them.</div>;
 
   return (
-    <div className="slack-mux" ref={ref}>
+    <div className="slack-mux-wrap">
+      <div className="slack-mux-filter">
+        <span className="slack-mux-filter-ic">🔍</span>
+        <input className="slack-mux-filter-input" value={nameFilter}
+          onChange={(e) => setNameFilter(e.target.value)}
+          placeholder="Filter by name…" spellCheck={false} />
+        {nameFilter && <button className="slack-mux-filter-clear" title="Clear filter" onClick={() => setNameFilter("")}>×</button>}
+        <button className={`slack-mux-smart ${smartOn ? "active" : ""}`}
+          title="Highlight important messages (Claude triage)"
+          onClick={() => setSlackSentimentConfig({ enabled: !smartOn })}>✨ Smart</button>
+        {smartOn && (
+          <input className="slack-mux-note" value={noteDraft}
+            onChange={(e) => setNoteDraft(e.target.value)}
+            onBlur={saveNote}
+            onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); }}
+            placeholder="What matters to you…" spellCheck={false}
+            title="Tell Claude what counts as important for you" />
+        )}
+      </div>
+      <div className="slack-mux" ref={ref}>
       {buckets.length === 0
-        ? <div className="slack-empty">No messages yet — give the poller a moment.</div>
+        ? <div className="slack-empty">{terms.length ? `No messages matching ${terms.map((t) => `"${t}"`).join(", ")}.` : "No messages yet — give the poller a moment."}</div>
         : buckets.map((b) => (
-          <div className="slack-mux-bucket" key={b.key}>
-            <div className="slack-mux-bucket-head">{fmtBucket(b.start)}</div>
-            {b.msgs.map((m, i) => {
-              const prev = b.msgs[i - 1];
-              const showChan = !prev || prev.channel !== m.channel;
-              const c = byId(m.channel);
-              return (
-                <div className="slack-mux-msg" key={`${m.ts}-${m.channel}-${i}`}>
-                  {showChan && <div className="slack-mux-chan">{c?.is_im ? "@" : "#"}{c?.name || m.channel}</div>}
-                  <div className="slack-msg-meta"><b>{m.user || "?"}</b> <span className="slack-msg-time">{fmtTs(m.ts)}</span>
-                    {teamUrl && <a className="slack-msg-link" href={slackMsgLink(teamUrl, m.channel, m.ts)} target="_blank" rel="noreferrer" title="Open in Slack">↗</a>}
+          <div className="slack-hour" key={b.key}>
+            <div className="slack-hour-head">{fmtBucket(b.start)}</div>
+            <div className="slack-hour-card">
+              {b.msgs.map((m, i) => {
+                const c = byId(m.channel);
+                // When Smart is on, lift flagged messages and dim the rest (until
+                // scored, a message has no entry — left neutral, not dimmed).
+                const s = smartOn ? sentOf(m) : null;
+                const cls = s ? (s.important ? "is-important" : "is-dim") : "";
+                return (
+                  <div className={`slack-feed-msg ${cls}`} key={`${m.ts}-${m.channel}-${i}`}>
+                    <div className="slack-feed-head">
+                      <span className="slack-feed-name">{m.user || "?"}</span>
+                      <span className="slack-feed-chan">{c?.is_im ? "@" : "#"}{c?.name || m.channel}</span>
+                      <span className="slack-feed-time">{fmtTs(m.ts)}</span>
+                      {s?.important && s.reason &&
+                        <span className="slack-feed-reason" title={s.reason}>✨ {s.reason}</span>}
+                      {teamUrl && <a className="slack-feed-link" href={slackMsgLink(teamUrl, m.channel, m.ts)} target="_blank" rel="noreferrer" title="Open in Slack">↗</a>}
+                    </div>
+                    <div className="slack-msg-text"><SlackText text={m.text} /></div>
                   </div>
-                  <div className="slack-msg-text">{m.text}</div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
         ))}
+      </div>
     </div>
   );
 }
@@ -152,7 +197,7 @@ function SlackPin({ channel, name, isPrivate, isIm, items, onClose, teamUrl }) {
 /** Slack tab: connect with a token (bot xoxb- or user xoxp-), browse channels +
  *  recent messages, view your mentions, and post a message. The token lives only
  *  on the server; the client just sees {configured, channels} + fetched messages. */
-export default function SlackDashboard({ slack, messages, mentions }) {
+export default function SlackDashboard({ slack, messages, mentions, sentiment, sentiments }) {
   const [mode, setMode] = useState("oauth");        // "oauth" | "token" | "browser"
   const [token, setToken] = useState("");
   const [cookie, setCookie] = useState("");
@@ -396,7 +441,8 @@ export default function SlackDashboard({ slack, messages, mentions }) {
               })}
               <span className="slack-mux-chip-hint">drag channels here</span>
             </div>
-            <SlackMultiplexer mux={muxObj} channels={slack.channels} messages={messages} teamUrl={slack.teamUrl} />
+            <SlackMultiplexer mux={muxObj} channels={slack.channels} messages={messages} teamUrl={slack.teamUrl}
+              sentiment={sentiment} sentiments={sentiments} />
           </>
         ) : showMentions ? (
           <>
@@ -409,7 +455,7 @@ export default function SlackDashboard({ slack, messages, mentions }) {
                     <div className="slack-msg-meta"><b>{m.user || "?"}</b> <span className="slack-msg-time">{fmtTs(m.ts)}</span>{m.channel ? ` · #${m.channel}` : ""}
                       {m.permalink && <a className="slack-msg-link" href={m.permalink} target="_blank" rel="noreferrer" title="Open in Slack">↗</a>}
                     </div>
-                    <div className="slack-msg-text">{m.text}</div>
+                    <div className="slack-msg-text"><SlackText text={m.text} /></div>
                   </div>
                 ))}
             </div>

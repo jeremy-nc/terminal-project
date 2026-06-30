@@ -1,8 +1,26 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import * as THREE from "three";
-import { readNodeScreen, sendTerminalInput, scrollNodeTerminal } from "../terminalController.js";
+import {
+  readNodeScreen, sendTerminalInput, scrollNodeTerminal,
+  getPeers, getSelfPresenceId, reportPose,
+} from "../terminalController.js";
 import { getTheme } from "./world/themes/index.js";
-import { paintScreen, paintStandby, keyEventToBytes, EYE } from "./world/worldkit.js";
+import { paintScreen, paintStandby, keyEventToBytes, EYE, makeClaude } from "./world/worldkit.js";
+
+// Per-id hue so multiple visitors are distinguishable. Tints the avatar's clay-
+// coloured meshes (leaves the black eyes); clones the material so it's per-avatar.
+const CLAY = 0xcc785c;
+function tintAvatar(group, id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  const hue = (h % 360) / 360;
+  group.traverse((o) => {
+    if (o.material && o.material.color && o.material.color.getHex() === CLAY) {
+      o.material = o.material.clone();
+      o.material.color.setHSL(hue, 0.55, 0.6);
+    }
+  });
+}
 
 /**
  * Experimental first-person 3D view of a pipeline. Each top-level stage becomes a
@@ -63,6 +81,7 @@ export default function WorldView({ stages, workspaceId, theme, onPortal, spawn 
       treeWalls: built.treeWalls,
       trees: built.trees,
       rooms: new Map(),
+      avatars: new Map(),   // presence_id -> remote visitor avatar (see render loop)
       sig: "",
     });
 
@@ -218,6 +237,55 @@ export default function WorldView({ stages, workspaceId, theme, onPortal, spawn 
         }
       }
 
+      // ── presence: report our pose (throttled, on-move) + render other visitors ──
+      const wid = wsRef.current;
+      // Our own camera pose at ~20Hz, only when it actually changed. The backend
+      // relays it to same-world windows; receivers interpolate for smoothness.
+      if (wid && nowMs - (S.current.lastPoseAt || 0) > 50) {
+        const lp = S.current.lastPose;
+        const moved = !lp || Math.abs(lp.x - camera.position.x) > 0.02
+          || Math.abs(lp.z - camera.position.z) > 0.02 || Math.abs(lp.yaw - yaw) > 0.01;
+        if (moved) {
+          reportPose(camera.position.x, camera.position.y, camera.position.z, yaw);
+          S.current.lastPose = { x: camera.position.x, z: camera.position.z, yaw };
+        }
+        S.current.lastPoseAt = nowMs;
+      }
+      // Reconcile + interpolate remote visitors: a peer is anyone focused on THIS
+      // world (and not us). Add/remove avatars as they come and go; lerp each toward
+      // its latest target every frame so motion looks continuous between packets.
+      const peers = getPeers(), selfId = getSelfPresenceId(), avatars = S.current.avatars;
+      const liveIds = new Set();
+      peers.forEach((p, id) => {
+        if (id === selfId || p.focus !== wid || p.x == null) return;
+        liveIds.add(id);
+        let av = avatars.get(id);
+        if (!av) {                                  // theme's avatar, or the default Claude
+          const built = (themeMod.makeAvatar || makeClaude)();
+          tintAvatar(built.group, id);
+          scene.add(built.group);
+          av = { group: built.group, legs: built.legs || [], cur: { x: p.x, z: p.z, yaw: p.yaw || 0 }, phase: 0 };
+          avatars.set(id, av);
+        }
+        av.tx = p.x; av.tz = p.z; av.tyaw = p.yaw || 0;
+      });
+      avatars.forEach((av, id) => {
+        if (!liveIds.has(id)) { scene.remove(av.group); avatars.delete(id); return; }
+        const k = Math.min(1, dt * 10);
+        const ddx = av.tx - av.cur.x, ddz = av.tz - av.cur.z;
+        av.cur.x += ddx * k; av.cur.z += ddz * k;
+        let dy = av.tyaw - av.cur.yaw;
+        while (dy > Math.PI) dy -= 2 * Math.PI;
+        while (dy < -Math.PI) dy += 2 * Math.PI;
+        av.cur.yaw += dy * k;
+        av.group.position.set(av.cur.x, 0, av.cur.z);
+        av.group.rotation.y = av.cur.yaw + Math.PI;   // model faces +z; camera-forward is -z at yaw 0
+        const sp = Math.hypot(ddx, ddz);
+        av.phase += sp * 9;
+        const amp = Math.min(0.5, sp * 10);           // leg swing scales with speed
+        for (let i = 0; i < av.legs.length; i++) av.legs[i].rotation.x = Math.sin(av.phase + (i % 2) * Math.PI) * amp;
+      });
+
       // Per-frame theme animation (water drift, walking mascot, LED marquee, …).
       themeMod.animate(S.current, dt);
 
@@ -248,6 +316,8 @@ export default function WorldView({ stages, workspaceId, theme, onPortal, spawn 
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
       if (document.pointerLockElement === canvas) document.exitPointerLock();
+      (S.current.avatars || new Map()).forEach((av) => scene.remove(av.group));
+      S.current.avatars = new Map();
       renderer.dispose();
       host.removeChild(canvas);
     };

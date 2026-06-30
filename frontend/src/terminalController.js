@@ -62,6 +62,12 @@ let _state = {
   slack: { configured: false, channels: [], polled: [], multiplexers: [], teamUrl: "" },
   slackMessages: {},   // channel id -> recent messages (open-channel load + poller)
   slackMentions: [],
+  // slack → sentiment subdomain (optional importance triage). `slackSentiment` is
+  // the global config (the ✨ Smart toggle + the "what matters to me" note);
+  // `slackSentiments` is the side-table keyed by `channel:ts` -> {important, reason}.
+  // Decoupled from the raw messages so the feature can be removed cleanly.
+  slackSentiment: { enabled: false, note: "" },
+  slackSentiments: {},
   // automations domain: user rules that turn domain events into actions (today:
   // a new PR -> a worktree workspace running a pipeline). `automationKinds` is the
   // backend manifest that drives the rule editor generically. Evaluated on the
@@ -71,9 +77,11 @@ let _state = {
   // CI/CD domain → TeamCity subdomain: connection state + live recent-build feed.
   // The token/OAuth secret live server-side only (never sent to the client).
   cicd: { teamcity: { configured: false, connected: false, url: "", hasToken: false,
-                      hasOauthClient: false, hasCreds: false, builds: [], projects: [], error: null } },
+                      hasOauthClient: false, hasCreds: false, builds: [], projects: [],
+                      buildTypes: [], error: null } },
   teamcityProjectBuilds: {},   // projectId -> recent builds (on-demand, picker selection)
   teamcityBranchBuilds: {},    // branch -> recent builds (poller-fed; per-workspace branch panel)
+  teamcityBuildTypeStatus: {}, // "buildTypeId branch" -> latest build (trigger-tile status LEDs)
   docsTrees: {},               // docs-dir -> { tree, exists } (FS-watcher-fed; per-workspace docs panel)
   // Active whole-app animations: [{ type, key }]. Several can run at once so a
   // view/action can fire a combination of effects. <AppFx/> renders each.
@@ -81,7 +89,21 @@ let _state = {
   // Create-workspace modal: null = closed; { kind?, fields? } = open (optionally
   // pre-filled, e.g. from a /pipeline/new-workspace deep-link or a PR action).
   newWorkspace: null,
+  // Presence across all open windows (every connection is a Subscriber on the Hub).
+  // `windows` = live count; `selfId` = THIS window's id; `roster` = [{id, focus}]
+  // where focus is the workspace/world that window is in (null = not on a WorldView).
+  // Foundation for WorldView avatars (next: per-window camera coords under each id).
+  presence: { windows: 0, selfId: null, roster: [] },
 };
+
+// Presence peers for the WorldView, kept OUT of React state (positions update at
+// ~20Hz — re-rendering on each would be wasteful). WorldView reads this map
+// imperatively in its render loop. id -> { focus, x, y, z, yaw, t }. `focus` comes
+// from the roster (presence event); x/y/z/yaw from presence_pos.
+const _peers = new Map();
+let _selfPresenceId = null;
+export function getPeers() { return _peers; }
+export function getSelfPresenceId() { return _selfPresenceId; }
 
 let _fxSeq = 0;
 
@@ -185,6 +207,10 @@ function _connect() {
     // Re-register any open branch panels — the backend's watched set is in-memory
     // and is lost across a server restart/reconnect.
     if (_branchWatchers.size) _sendWatchedBranches();
+    if (_buildTypeWatchers.size) _sendWatchedBuildTypes();
+    // Re-assert this window's presence focus — the backend's per-window focus is
+    // in-memory and lost across a server restart/reconnect.
+    _sendFocus();
     // Same for open docs-explorer panels — the backend's watcher set is in-memory.
     if (_docsWatchers.size) _sendWatchedDocs();
     // Reconnect: re-subscribe any already-mounted terminals (reset first so the
@@ -342,6 +368,44 @@ function _handleMsg(msg) {
       if (!msg.ok) _pushToast(`Slack: ${msg.error || "send failed"}`);
       break;
     }
+    case "presence_self": {
+      // Our own connection id — so the WorldView skips rendering our own avatar.
+      _selfPresenceId = msg.id || null;
+      _setState({ presence: { ..._state.presence, selfId: _selfPresenceId } });
+      break;
+    }
+    case "presence": {
+      const roster = msg.roster || [];
+      _setState({ presence: { ..._state.presence, windows: msg.windows || 0, roster } });
+      // Reconcile the imperative peer map: set each peer's focus (world); keep any
+      // existing pose; drop peers no longer present.
+      const ids = new Set();
+      for (const r of roster) {
+        ids.add(r.id);
+        const p = _peers.get(r.id) || {};
+        p.focus = r.focus;
+        _peers.set(r.id, p);
+      }
+      for (const id of [..._peers.keys()]) if (!ids.has(id)) _peers.delete(id);
+      break;
+    }
+    case "presence_pos": {
+      // High-frequency peer camera pose — update the map in place (no re-render).
+      const p = _peers.get(msg.id) || {};
+      p.x = msg.x; p.y = msg.y; p.z = msg.z; p.yaw = msg.yaw; p.t = performance.now();
+      _peers.set(msg.id, p);
+      break;
+    }
+    case "slack_sentiment": {
+      // `reset` (sync / note-changed) replaces the side-table; otherwise merge the
+      // delta of newly-scored messages into it.
+      _setState({
+        slackSentiment: msg.config || _state.slackSentiment,
+        slackSentiments: msg.reset ? (msg.sentiments || {})
+                                    : { ..._state.slackSentiments, ...(msg.sentiments || {}) },
+      });
+      break;
+    }
     case "prs": {
       const prs = msg.prs || [];
       _setState({
@@ -369,6 +433,11 @@ function _handleMsg(msg) {
     case "teamcity_branch_builds": {
       const key = teamcityBranchKey(msg.repo, msg.branch);
       _setState({ teamcityBranchBuilds: { ..._state.teamcityBranchBuilds, [key]: msg.builds || [] } });
+      break;
+    }
+    case "teamcity_buildtype_status": {
+      const key = teamcityBuildTypeKey(msg.buildTypeId, msg.branch);
+      _setState({ teamcityBuildTypeStatus: { ..._state.teamcityBuildTypeStatus, [key]: msg.build || null } });
       break;
     }
     case "docs_tree": {
@@ -760,6 +829,31 @@ export function unwatchTeamCityBranch(repo, branch) {
   e.count -= 1;
   if (e.count <= 0) { _branchWatchers.delete(key); _sendWatchedBranches(); }
 }
+
+// A trigger tile's status LED is identified by (buildTypeId, branch) — read by the
+// config's own id, so it's repo-independent (deploy/terraform configs may build a
+// different VCS root than the app repo). Ref-counted like branch panels.
+export function teamcityBuildTypeKey(buildTypeId, branch) { return `${buildTypeId || ""} ${branch || ""}`; }
+const _buildTypeWatchers = new Map();   // key -> { count, buildTypeId, branch }
+function _sendWatchedBuildTypes() {
+  _send({ type: "teamcity_set_watched_build_types",
+          buildTypes: [..._buildTypeWatchers.values()].map(({ buildTypeId, branch }) => ({ buildTypeId, branch })) });
+}
+export function watchTeamCityBuildType(buildTypeId, branch) {
+  if (!buildTypeId || !branch) return;
+  const key = teamcityBuildTypeKey(buildTypeId, branch);
+  const e = _buildTypeWatchers.get(key);
+  if (e) { e.count += 1; }
+  else { _buildTypeWatchers.set(key, { count: 1, buildTypeId, branch }); _sendWatchedBuildTypes(); }
+}
+export function unwatchTeamCityBuildType(buildTypeId, branch) {
+  if (!buildTypeId || !branch) return;
+  const key = teamcityBuildTypeKey(buildTypeId, branch);
+  const e = _buildTypeWatchers.get(key);
+  if (!e) return;
+  e.count -= 1;
+  if (e.count <= 0) { _buildTypeWatchers.delete(key); _sendWatchedBuildTypes(); }
+}
 // Docs-explorer panels are ref-counted by their docs directory (the same dir can be
 // shown by several panels): N mounted panels keep the backend's FS watcher for that
 // dir exactly once; it drops out of the watched set when the last unmounts.
@@ -778,7 +872,7 @@ export function unwatchDocs(dir) {
   else _docsWatchers.set(dir, c - 1);
 }
 
-export function triggerTeamCityBuild(buildTypeId, branch) { _send({ type: "teamcity_trigger", buildTypeId, branch }); }
+export function triggerTeamCityBuild(buildTypeId, branch, repo) { _send({ type: "teamcity_trigger", buildTypeId, branch, repo }); }
 export function cancelTeamCityBuild(buildId, state) { _send({ type: "teamcity_cancel", buildId, state }); }
 export function rerunTeamCityBuild(buildId) { _send({ type: "teamcity_rerun", buildId }); }
 
@@ -886,10 +980,39 @@ export function loadSlackMentions() {
 export function sendSlackMessage(channel, text) {
   if (channel && (text || "").trim()) _send({ type: "slack_send", channel, text });
 }
+/** slack→sentiment subdomain: set the ✨ Smart toggle and/or the "what matters to
+ *  me" note (global, persisted server-side). Either field may be omitted to leave
+ *  it unchanged; changing the note re-scores against it. */
+export function setSlackSentimentConfig({ enabled, note }) {
+  const m = { type: "slack_sentiment_config" };
+  if (enabled !== undefined) m.enabled = enabled;
+  if (note !== undefined) m.note = note;
+  _send(m);
+}
 
 export function selectWorkspace(wid) {
   _setState({ activeWorkspaceId: wid });
   setTimeout(refitNodes, 0); // the now-visible workspace's node terminals
+}
+
+// Presence: report which workspace/world THIS window is in (null when off the
+// WorldView). Cached so it can be re-sent on reconnect (the backend's per-window
+// focus is in-memory). Called from App when the view or active workspace changes.
+let _focus = null;
+function _sendFocus() { _send({ type: "presence_focus", workspace_id: _focus }); }
+export function reportFocus(workspaceId) {
+  const next = workspaceId || null;
+  if (next === _focus) return;   // no-op if unchanged (avoids redundant broadcasts)
+  _focus = next;
+  _sendFocus();
+}
+
+// Presence: report THIS window's WorldView camera pose. Called from the render
+// loop; the loop throttles (~20Hz) and only calls when the camera actually moved,
+// and the backend relays it to same-world windows. Receivers interpolate, so the
+// modest send rate still looks smooth.
+export function reportPose(x, y, z, yaw) {
+  _send({ type: "presence_pos", x, y, z, yaw });
 }
 
 /** Persist a new tab order (decoupled from the Workspace model). The server

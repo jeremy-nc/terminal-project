@@ -86,7 +86,10 @@ class TeamCityService:
         self._creds = None          # google OAuth Credentials (our own grant)
         self._builds = []           # cached recent build feed
         self._projects = []         # cached project list (id, name, path) — for the picker
+        self._build_types = []      # cached build configs (id, name, project, root) — drives trigger buttons
+        self._proj_by_id = {}       # project id -> raw project, for path/root resolution
         self._watched_branches = []  # branches the poller refreshes + broadcasts (ref-counted by the UI)
+        self._watched_build_types = []  # (buildTypeId, branch) pairs for the trigger-tile status LEDs
         self._connected = False     # last refresh/connect succeeded
         self._error = None          # last error string (shown in UI)
         self._load()
@@ -181,6 +184,8 @@ class TeamCityService:
             self._builds = [self._row(b) for b in (data.get("build") or [])]
             if not self._projects:        # load the project list once, on first connect
                 self._fetch_projects()
+            if not self._build_types:     # and the build configs (drives the trigger buttons)
+                self._fetch_build_types()
             self._connected = True
             self._error = None
         except Exception as e:
@@ -194,12 +199,14 @@ class TeamCityService:
         path mirrors the feed's project names (``Monolith / Build / …``)."""
         try:
             data = self._http().get("/app/rest/projects",
-                                    params={"fields": "project(id,name,parentProjectId,archived)"})
+                                    params={"locator": "count:5000",
+                                            "fields": "project(id,name,parentProjectId,archived)"})
         except Exception as e:
             print(f"[teamcity] projects: {_err(e)}", flush=True)
             return
         raw = data.get("project") or []
         by_id = {p["id"]: p for p in raw}
+        self._proj_by_id = by_id      # kept so build types can resolve their root project
 
         def path(p):
             parts, cur = [], p
@@ -208,10 +215,54 @@ class TeamCityService:
                 cur = by_id.get(cur.get("parentProjectId"))
             return " / ".join(reversed(parts))
 
+        def proj(p):
+            r = self._root_of(p.get("id"), by_id)   # top-level project (under _Root)
+            return {"id": p["id"], "name": p.get("name"), "path": path(p),
+                    "rootId": r.get("id"), "rootName": r.get("name")}
+
         self._projects = sorted(
-            ({"id": p["id"], "name": p.get("name"), "path": path(p)}
-             for p in raw if p.get("id") != "_Root" and not p.get("archived")),
+            (proj(p) for p in raw if p.get("id") != "_Root" and not p.get("archived")),
             key=lambda p: p["path"].lower())
+
+    @staticmethod
+    def _root_of(project_id, by_id):
+        """The top-level project (directly under ``_Root``) that contains
+        ``project_id`` — used to scope build configs to one project tree, since a
+        sub-project name (e.g. 'Ray White Development') can repeat across projects."""
+        cur = by_id.get(project_id)
+        while cur:
+            par = cur.get("parentProjectId")
+            if not par or par == "_Root":
+                return cur
+            nxt = by_id.get(par)
+            if not nxt:
+                return cur
+            cur = nxt
+        return {}
+
+    def _fetch_build_types(self):
+        """Cache every build configuration (id, name, immediate project, top-level
+        project) so the client can offer one-click trigger buttons for known configs
+        without a per-widget fetch. Loaded once on connect, alongside the projects."""
+        try:
+            data = self._http().get("/app/rest/buildTypes",
+                                    params={"locator": "count:5000",
+                                            "fields": "buildType(id,name,projectId,projectName)"})
+        except Exception as e:
+            print(f"[teamcity] build types: {_err(e)}", flush=True)
+            return
+        by_id = self._proj_by_id
+        out = []
+        for bt in (data.get("buildType") or []):
+            pid = bt.get("projectId")
+            p = by_id.get(pid) or {}
+            r = self._root_of(pid, by_id)
+            # TeamCity's buildType.projectName is the full PATH; use the authoritative
+            # immediate project name from the project map so sub-project matching works.
+            out.append({"id": bt.get("id"), "name": bt.get("name"), "projectId": pid,
+                        "projectName": p.get("name") or bt.get("projectName"),
+                        "rootId": r.get("id"), "rootName": r.get("name")})
+        self._build_types = out
 
     def branch_builds(self, branch: str, repo: str = "", count: int = 25):
         """Recent builds for one VCS branch in a SPECIFIC repo, newest first.
@@ -249,6 +300,50 @@ class TeamCityService:
 
     def watched_branches(self):
         return list(self._watched_branches)
+
+    # ── watched build configs (the trigger tiles' status LEDs, ref-counted) ───
+    def set_watched_build_types(self, watched):
+        """Replace the watched ``(buildTypeId, branch)`` set that drives the trigger
+        tiles' status LEDs. In-memory UI state, rebuilt as tiles mount."""
+        out = []
+        for w in (watched or []):
+            if isinstance(w, dict) and w.get("buildTypeId") and w.get("branch"):
+                out.append({"buildTypeId": str(w["buildTypeId"]), "branch": str(w["branch"])})
+        self._watched_build_types = out
+        return out
+
+    def watched_build_types(self):
+        return list(self._watched_build_types)
+
+    def build_type_status(self, build_type_id: str, branch: str):
+        """The current status of ONE config on ONE branch, or None. Checks the build
+        QUEUE first (a queued build is the most current state, and ``/app/rest/builds``
+        does NOT return queued builds), then falls back to the latest running/finished
+        build. Not repo-scoped — a config's status is unambiguous by its own id, and
+        deploy/terraform configs frequently build a different VCS root than the app."""
+        if not build_type_id or not branch or not self.configured():
+            return None
+        http = self._http()
+        # 1. Queued? The queue is a separate resource; match the branch client-side.
+        try:
+            q = http.get("/app/rest/buildQueue",
+                         params={"locator": f"buildType:(id:{build_type_id})", "fields": _BUILD_FIELDS})
+            for qb in (q.get("build") or []):
+                if (qb.get("branchName") or "") == branch:
+                    return self._row(qb)   # state == "queued"
+        except Exception as e:
+            print(f"[teamcity] queue {build_type_id}@{branch}: {_err(e)}", flush=True)
+        # 2. Else the latest running/finished build on this branch.
+        locator = (f"buildType:(id:{build_type_id}),branch:(name:{branch}),"
+                   f"running:any,canceled:any,failedToStart:any,count:1")
+        try:
+            data = http.get("/app/rest/builds",
+                            params={"locator": locator, "fields": _BUILD_FIELDS})
+        except Exception as e:
+            print(f"[teamcity] build type status {build_type_id}@{branch}: {_err(e)}", flush=True)
+            return None
+        builds = data.get("build") or []
+        return self._row(builds[0]) if builds else None
 
     def project_builds(self, project_id: str, count: int = 50):
         """Recent builds for one project (including its sub-projects), newest first."""
@@ -321,4 +416,5 @@ class TeamCityService:
         return {"configured": self.configured(), "connected": self._connected,
                 "url": self._url, "hasToken": bool(self._token),
                 "hasOauthClient": self.has_oauth_client(), "hasCreds": self.has_creds(),
-                "builds": self._builds, "projects": self._projects, "error": self._error}
+                "builds": self._builds, "projects": self._projects,
+                "buildTypes": self._build_types, "error": self._error}

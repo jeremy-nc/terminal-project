@@ -46,6 +46,7 @@ from terminal.workspace_kinds import get_kind, kinds_manifest, WorkspaceError
 from github.pulls import fetch_my_pulls, GitHubAuthError
 from repos import RepoIndex
 from slack import SlackService
+from slack.sentiment import SentimentService
 from automations import AutomationStore, automation_kinds_manifest
 from cicd import TeamCityService
 from docs_explorer import DocsService
@@ -56,6 +57,7 @@ WORKSPACES_FILE = os.path.join(HERE, "workspaces.json")
 WORKSPACE_ORDER_FILE = os.path.join(HERE, "workspace_order.json")
 REPOS_FILE = os.path.join(HERE, "repos.json")
 SLACK_FILE = os.path.join(HERE, "slack.json")
+SLACK_SENTIMENT_FILE = os.path.join(HERE, "slack_sentiment.json")
 AUTOMATIONS_FILE = os.path.join(HERE, "automations.json")
 TEAMCITY_FILE = os.path.join(HERE, "teamcity.json")
 
@@ -122,6 +124,12 @@ class Hub:
     def empty(self) -> bool:
         return not self._subs
 
+    def count(self) -> int:
+        return len(self._subs)
+
+    def subscribers(self):
+        return list(self._subs)
+
     def send(self, event: dict) -> None:
         for s in list(self._subs):
             s.send(event)
@@ -136,6 +144,9 @@ automation_store = AutomationStore(AUTOMATIONS_FILE)  # PR→workspace rules (fr
 teamcity_service = TeamCityService(TEAMCITY_FILE)  # CI/CD domain → TeamCity subdomain (IAP-fronted)
 hub = Hub()
 docs_service = DocsService(hub.send)  # Docs File Explorer: per-dir FS watchers, ref-counted by the UI
+# slack → sentiment subdomain: optional "is this message important?" Haiku triage,
+# side-table keyed by channel:ts. Decoupled — the slack poll just forwards its batch.
+sentiment_service = SentimentService(hub.send, SLACK_SENTIMENT_FILE)
 
 # Shared interactive-terminal registry (the Terminal-view tabs), mirrored to all
 # windows. Each entry's id is a live PTY session owned by `manager`.
@@ -173,6 +184,19 @@ def _automations_event() -> dict:
     Broadcast so every window's Automations panel stays in sync (no secrets)."""
     return {"type": "automations", "kinds": automation_kinds_manifest(),
             **automation_store.to_json()}
+
+
+def _presence_event() -> dict:
+    """Live presence across all open windows: the total window count plus a roster
+    of each connection — its stable id and the workspace/world it's focused on
+    (None when not on a workspace's WorldView). Foundation for WorldView avatars:
+    next we add each window's camera coords under the same id."""
+    roster = []
+    for s in hub.subscribers():
+        pid = getattr(s, "presence_id", None)
+        if pid:
+            roster.append({"id": pid, "focus": getattr(s, "focus", None)})
+    return {"type": "presence", "windows": hub.count(), "roster": roster}
 
 
 def _cicd_event() -> dict:
@@ -229,12 +253,23 @@ async def _poll_slack():
         await asyncio.sleep(SLACK_POLL_INTERVAL)
         if hub.empty() or not slack_service.configured():
             continue
+        batch = []   # accumulate the poll's messages for the optional sentiment pass
         for ch in slack_service.poll_set():   # pinned + every multiplexer's channels
             try:
                 msgs = await asyncio.to_thread(slack_service.channel_messages, ch, 30)
                 hub.send({"type": "slack_messages", "channel": ch, "messages": msgs})
+                for m in msgs:
+                    batch.append({"channel": ch, "ts": m.get("ts"),
+                                  "user": m.get("user"), "text": m.get("text")})
             except Exception as e:   # never let one channel kill the loop
                 print(f"[slack] poll {ch}: {e}", flush=True)
+        # Importance triage: scores only NEW messages (no-op if disabled or nothing
+        # new), so the 12s poll doubles as the coalesce window — a Haiku call only
+        # fires when fresh messages arrived. Never let it break the loop.
+        try:
+            await sentiment_service.maybe_score(batch)
+        except Exception as e:
+            print(f"[sentiment] poll score: {e}", flush=True)
 
 
 CICD_POLL_INTERVAL = 20  # seconds — refresh the TeamCity build feed
@@ -262,6 +297,17 @@ async def _poll_cicd():
                           "repo": w.get("repo", ""), "builds": builds})
             except Exception as e:
                 print(f"[teamcity] poll branch {w.get('branch')}: {e}", flush=True)
+        # Same loop refreshes each watched build config's status (the trigger tiles'
+        # LEDs) — keyed by config id + branch, so deploy/terraform configs on other
+        # VCS roots still report correctly.
+        for w in teamcity_service.watched_build_types():
+            try:
+                build = await asyncio.to_thread(
+                    teamcity_service.build_type_status, w["buildTypeId"], w["branch"])
+                hub.send({"type": "teamcity_buildtype_status", "buildTypeId": w["buildTypeId"],
+                          "branch": w["branch"], "build": build})
+            except Exception as e:
+                print(f"[teamcity] poll buildtype {w.get('buildTypeId')}: {e}", flush=True)
 
 
 @asynccontextmanager
@@ -535,6 +581,7 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         sub.send(_workspace_list_event())
         sub.send(_repos_event())
         sub.send(_slack_event())
+        sub.send(sentiment_service.full_event())   # slack sentiment side-table + config
         sub.send(_automations_event())
         sub.send(_cicd_event())
         for ws in workspaces.list():
@@ -542,6 +589,27 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             if run and run.task and not run.task.done():
                 for ev in list(run.event_log):
                     sub.send(ev)
+        return
+
+    if mtype == "presence_focus":
+        # This window reports which workspace/world it's currently in (None when
+        # off the WorldView). Re-broadcast the roster so every window sees it.
+        sub.focus = msg.get("workspace_id")
+        hub.send(_presence_event())
+        return
+
+    if mtype == "presence_pos":
+        # High-frequency WorldView camera pose. Relay ONLY to windows in the SAME
+        # world (matching focus), tagged with the sender's id — so each window
+        # renders the others as avatars. Never echoed back to the sender.
+        foc = getattr(sub, "focus", None)
+        if foc is None:
+            return
+        ev = {"type": "presence_pos", "id": sub.presence_id,
+              "x": msg.get("x"), "y": msg.get("y"), "z": msg.get("z"), "yaw": msg.get("yaw")}
+        for s in hub.subscribers():
+            if s is not sub and getattr(s, "focus", None) == foc:
+                s.send(ev)
         return
 
     # ── Shared interactive terminals (mirrored to every window) ──────────────
@@ -680,6 +748,21 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         asyncio.create_task(_refresh_teamcity())
         return
 
+    if mtype == "teamcity_set_watched_build_types":
+        # The UI's ref-counted union of trigger-tile statuses (config id + branch).
+        # Fetch + broadcast each immediately so a freshly-mounted tile's LED doesn't
+        # wait a poll cycle; the poller keeps them live thereafter.
+        async def _set_watched_bt():
+            watched = await asyncio.to_thread(
+                teamcity_service.set_watched_build_types, msg.get("buildTypes") or [])
+            for w in watched:
+                build = await asyncio.to_thread(
+                    teamcity_service.build_type_status, w["buildTypeId"], w["branch"])
+                hub.send({"type": "teamcity_buildtype_status", "buildTypeId": w["buildTypeId"],
+                          "branch": w["branch"], "build": build})
+        asyncio.create_task(_set_watched_bt())
+        return
+
     if mtype == "teamcity_set_watched_branches":
         # The UI's ref-counted union of open branch panels. Store it, then fetch +
         # broadcast each immediately so a freshly-mounted panel doesn't wait a poll
@@ -726,6 +809,20 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
                 sub.send({"type": "error", "message": f"TeamCity: {res.get('error')}"})
             await asyncio.to_thread(teamcity_service.refresh)   # reflect the change
             hub.send(_cicd_event())
+            # If this was a branch-scoped action (e.g. a trigger tile), re-fetch that
+            # branch right away so the queued/running build shows without waiting for
+            # the next poll — the tile's status LED updates near-immediately.
+            br = msg.get("branch")
+            if br:
+                rp = msg.get("repo") or ""
+                builds = await asyncio.to_thread(teamcity_service.branch_builds, br, rp, 25)
+                hub.send({"type": "teamcity_branch_builds", "branch": br, "repo": rp, "builds": builds})
+                # Also refresh the triggered config's tile status (precise by id).
+                bt_id = msg.get("buildTypeId")
+                if bt_id:
+                    build = await asyncio.to_thread(teamcity_service.build_type_status, bt_id, br)
+                    hub.send({"type": "teamcity_buildtype_status", "buildTypeId": bt_id,
+                              "branch": br, "build": build})
         asyncio.create_task(_tc_write())
         return
 
@@ -887,6 +984,28 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         asyncio.create_task(_slack_send())
         return
 
+    if mtype == "slack_sentiment_config":
+        # The ✨ Smart toggle + the "what matters to me" note. Persisted server-side,
+        # broadcast to every window; editing the note clears the cache (reset) so
+        # stale highlights drop. Then score the current poll set immediately so the
+        # user doesn't wait a poll cycle for highlights to appear.
+        async def _sentiment_cfg():
+            reset = sentiment_service.set_config(enabled=msg.get("enabled"), note=msg.get("note"))
+            sentiment_service.emit_config(reset)
+            if sentiment_service.enabled():
+                batch = []
+                for ch in slack_service.poll_set():
+                    try:
+                        msgs = await asyncio.to_thread(slack_service.channel_messages, ch, 30)
+                        for m in msgs:
+                            batch.append({"channel": ch, "ts": m.get("ts"),
+                                          "user": m.get("user"), "text": m.get("text")})
+                    except Exception:
+                        pass
+                await sentiment_service.maybe_score(batch)
+        asyncio.create_task(_sentiment_cfg())
+        return
+
     sess = manager.sessions.get(msg.get("id"))
     if mtype == "attach":
         if not sess:
@@ -939,8 +1058,12 @@ async def _drain(ws: WebSocket, sub: Subscriber) -> None:
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
     sub = Subscriber()
+    sub.presence_id = secrets.token_hex(4)   # stable per-connection id (for presence)
     hub.add(sub)  # receive broadcast state/run events
     drain = asyncio.create_task(_drain(ws, sub))
+    # Tell this window its own presence id, then broadcast the updated roster to all.
+    sub.send({"type": "presence_self", "id": sub.presence_id})
+    hub.send(_presence_event())
     try:
         while True:
             try:
@@ -970,6 +1093,7 @@ async def ws_endpoint(ws: WebSocket):
         hub.remove(sub)
         manager.detach(sub)
         drain.cancel()
+        hub.send(_presence_event())   # a window left — update everyone's roster
         if hub.empty():
             # No windows left: drop all docs FS watchers (the UI re-registers its open
             # panels on reconnect, same as the TeamCity watched set).

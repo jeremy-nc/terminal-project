@@ -278,6 +278,13 @@ html, body { background: var(--bg); }
 .status-open       { color: var(--success); }
 .status-connecting { color: var(--warn); }
 .status-closed     { color: var(--danger); }
+/* Presence: how many windows are connected to the app right now. */
+.presence-chip {
+  font-family: var(--mono); font-size: 11px; font-weight: 600;
+  display: inline-flex; align-items: center; gap: 4px;
+  color: var(--text-muted); border: 1px solid var(--border); border-radius: 999px;
+  padding: 2px 9px; cursor: default;
+}
 
 /* ── main stage ──────────────────────────────────────────── */
 .stage {
@@ -1038,6 +1045,29 @@ html, body { background: var(--bg); }
   border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px;
   max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+/* One-click trigger tiles for known build configs (all shown when connected).
+   Each is a little "device" whose LED shows the last status on THIS branch —
+   grey when nothing has run yet; green/red/blue/amber otherwise. */
+.tc-tiles { flex: 0 0 auto; display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; padding: 2px 0 4px; }
+.tc-tile { display: flex; flex-direction: column; align-items: center; gap: 6px; flex: 1 1 0; min-width: 0; background: none; border: none; cursor: pointer; padding: 0; }
+.tc-tile-screen {
+  width: 42px; height: 42px; border-radius: 50%;
+  background: #58585c; border: 1px solid rgba(0,0,0,0.3);
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: inset 0 -2px 6px rgba(0,0,0,0.25);
+  transition: transform 0.12s, box-shadow 0.12s;
+}
+.tc-tile:not(:disabled):hover .tc-tile-screen { transform: translateY(-1px); box-shadow: inset 0 -2px 6px rgba(0,0,0,0.25), 0 0 0 2px var(--accent); }
+.tc-tile:not(:disabled):active .tc-tile-screen { transform: translateY(0); }
+.tc-tile:not(:disabled):hover .tc-tile-label { color: var(--accent); }
+.tc-tile:disabled { cursor: default; }
+.tc-tile-na { opacity: 0.38; }   /* config not present in this branch's project */
+.tc-tile-led { width: 21px; height: 7px; border-radius: 4px; background: #6a6a73; transition: background 0.15s, box-shadow 0.15s; }
+.tc-tile-led.ok    { background: #4caf72; box-shadow: 0 0 7px rgba(76,175,114,0.8); }
+.tc-tile-led.bad   { background: #ff6b6b; box-shadow: 0 0 7px rgba(255,107,107,0.8); }
+.tc-tile-led.run   { background: #6c9ae7; box-shadow: 0 0 7px rgba(108,154,231,0.85); animation: run-pulse 1.6s ease-out infinite; }
+.tc-tile-led.queue { background: #d9b144; box-shadow: 0 0 7px rgba(217,177,68,0.8); }
+.tc-tile-label { font-size: 11px; line-height: 1.25; color: var(--text); text-align: center; word-break: break-word; }
 .tc-branch-list { overflow-y: auto; display: flex; flex-direction: column; gap: 6px; min-height: 0; }
 /* Compact build row for the branch panel: status · short hash · open. */
 .ci-row.compact { gap: 10px; padding: 6px 8px; }
@@ -1809,6 +1839,10 @@ html, body { background: var(--bg); }
 .slack-msg:hover .slack-msg-link, .slack-mux-msg:hover .slack-msg-link { opacity: 1; }
 .slack-msg-link:hover { color: var(--accent-hover, #8f82ff); }
 .slack-msg-text { font-size: 13px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.sl-mention { color: #8ab4f8; background: rgba(138,180,248,0.12); border-radius: 3px; padding: 0 2px; }
+.sl-link { color: var(--accent); text-decoration: none; }
+.sl-link:hover { text-decoration: underline; }
+.sl-code { font-family: var(--mono); font-size: 0.92em; background: rgba(255,255,255,0.07); border-radius: 3px; padding: 0 4px; }
 .slack-empty { color: var(--text-muted, #9a9aa3); font-size: 13px; padding: 12px 0; }
 .slack-empty code { background: var(--surface, #16161a); padding: 1px 5px; border-radius: 4px; }
 .slack-empty-center { margin: auto; text-align: center; }
@@ -1907,10 +1941,46 @@ html, body { background: var(--bg); }
 .slack-mux-chip button:hover { color: var(--text, #ededef); }
 .slack-mux-chip-hint { font-size: 11px; color: var(--text-faint, #6a6a73); }
 
-.slack-mux { flex: 1; overflow-y: auto; padding: 8px 0 14px; }
-.slack-mux-bucket-head { position: sticky; top: 0; z-index: 1; background: var(--bg, #0e0e10); padding: 8px 18px; font-size: 11px; font-weight: 600; letter-spacing: 0.03em; color: var(--text-muted, #9a9aa3); border-bottom: 1px solid var(--border, #2a2a3a); }
-.slack-mux-msg { padding: 6px 18px; }
-.slack-mux-chan { font-size: 12px; font-weight: 600; color: var(--accent-hover, #8f82ff); margin-top: 8px; }
+/* Flat, roomy message feed: each hour is a big rounded card; messages within are
+   chronological (no per-channel grouping) and self-labelled "Name #channel time ↗". */
+.slack-mux-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.slack-mux-filter { display: flex; align-items: center; gap: 8px; padding: 10px 16px; border-bottom: 1px solid var(--border, #2a2a3a); }
+.slack-mux-filter-ic { font-size: 12px; opacity: 0.6; }
+.slack-mux-filter-input { flex: 1; min-width: 0; background: var(--surface-2, #16161a); border: 1px solid var(--border, #2a2a3a); border-radius: 999px; color: var(--text, #ededef); font-size: 12.5px; padding: 5px 12px; }
+.slack-mux-filter-input:focus { outline: none; border-color: var(--accent, #7c6cff); }
+.slack-mux-filter-clear { background: none; border: none; color: var(--text-faint, #6a6a73); cursor: pointer; font-size: 16px; line-height: 1; padding: 0 4px; }
+.slack-mux-filter-clear:hover { color: var(--text, #ededef); }
+.slack-mux { flex: 1; overflow-y: auto; padding: 18px 16px 24px; display: flex; flex-direction: column; gap: 20px; }
+.slack-hour { display: flex; flex-direction: column; gap: 9px; }
+.slack-hour-head { padding: 0 8px; font-size: 11px; font-weight: 600; letter-spacing: 0.05em; text-transform: uppercase; color: var(--text-faint, #6a6a73); }
+.slack-hour-card {
+  background: var(--surface-2, #16161a);
+  border: 1px solid var(--border, #2a2a3a);
+  border-radius: 18px;
+  padding: 18px 20px;
+  display: flex; flex-direction: column; gap: 20px;
+}
+.slack-feed-msg { display: flex; flex-direction: column; gap: 4px; }
+.slack-feed-head { display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; }
+.slack-feed-name { font-weight: 600; color: var(--text, #ededef); }
+.slack-feed-chan { font-weight: 600; color: var(--accent-hover, #8f82ff); }
+.slack-feed-time { color: var(--text-faint, #6a6a73); font-size: 11.5px; }
+.slack-feed-link { margin-left: auto; color: var(--text-faint, #6a6a73); text-decoration: none; opacity: 0.45; transition: opacity 0.15s, color 0.15s; }
+.slack-feed-msg:hover .slack-feed-link { opacity: 1; }
+.slack-feed-link:hover { color: var(--accent, #7c6cff); }
+
+/* slack→sentiment subdomain: ✨ Smart toggle + "what matters to me" note, and the
+   per-message importance highlight (flagged lifted, the rest dimmed). */
+.slack-mux-smart { background: none; border: 1px solid var(--border, #2a2a3a); border-radius: 999px; color: var(--text-faint, #6a6a73); cursor: pointer; font-size: 12px; padding: 5px 12px; white-space: nowrap; transition: color 0.15s, border-color 0.15s, background 0.15s; }
+.slack-mux-smart:hover { color: var(--text, #ededef); border-color: var(--accent, #7c6cff); }
+.slack-mux-smart.active { color: #fff; border-color: var(--accent, #7c6cff); background: var(--accent, #7c6cff); }
+.slack-mux-note { flex: 1.4; min-width: 80px; background: var(--surface-2, #16161a); border: 1px solid var(--border, #2a2a3a); border-radius: 999px; color: var(--text, #ededef); font-size: 12.5px; padding: 5px 12px; }
+.slack-mux-note:focus { outline: none; border-color: var(--accent, #7c6cff); }
+.slack-feed-msg.is-dim { opacity: 0.4; transition: opacity 0.15s; }
+.slack-feed-msg.is-dim:hover { opacity: 0.85; }
+.slack-feed-msg.is-important { position: relative; padding-left: 12px; }
+.slack-feed-msg.is-important::before { content: ""; position: absolute; left: 0; top: 1px; bottom: 1px; width: 3px; border-radius: 3px; background: var(--accent, #7c6cff); }
+.slack-feed-reason { font-size: 10.5px; font-weight: 600; color: var(--accent-hover, #8f82ff); background: color-mix(in srgb, var(--accent, #7c6cff) 16%, transparent); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
 
 .slack-mux-rename-btn { background: none; border: none; color: var(--text-faint, #6a6a73); cursor: pointer; font-size: 13px; margin-left: 8px; padding: 2px 4px; border-radius: 4px; }
 .slack-mux-rename-btn:hover { color: var(--accent-hover, #8f82ff); background: rgba(255,255,255,0.06); }

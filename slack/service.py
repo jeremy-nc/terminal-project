@@ -14,6 +14,7 @@ calls catch broadly so a bad token / network blip can never crash the server.
 """
 import json
 import os
+import re
 from urllib.parse import urlencode
 
 from slack_sdk import WebClient
@@ -24,6 +25,9 @@ SLACK_USER_SCOPES = (
     "channels:read,channels:history,groups:read,groups:history,"
     "im:read,im:history,mpim:read,mpim:history,search:read,users:read,chat:write"
 )
+
+
+_MENTION_RE = re.compile(r"<@([UWB][A-Z0-9]+)>")   # bare user/bot mentions (no |label yet)
 
 
 def _err(e) -> str:
@@ -235,7 +239,7 @@ class SlackService:
                 if m.get("type") != "message":
                     continue
                 out.append({"ts": m.get("ts"), "user": self._user_name(m.get("user")),
-                            "text": m.get("text", "")})
+                            "text": self._resolve_mentions(m.get("text", ""))})
             return out
         except Exception as e:
             print(f"[slack] history ({channel}): {_err(e)}", flush=True)
@@ -249,7 +253,7 @@ class SlackService:
             me = self._client.auth_test().get("user_id")
             r = self._client.search_messages(query=f"<@{me}>", count=count, sort="timestamp")
             return [{"ts": m.get("ts"), "channel": (m.get("channel") or {}).get("name"),
-                     "user": m.get("username"), "text": m.get("text", ""),
+                     "user": m.get("username"), "text": self._resolve_mentions(m.get("text", "")),
                      "permalink": m.get("permalink")}
                     for m in r.get("messages", {}).get("matches", [])]
         except Exception as e:
@@ -283,6 +287,14 @@ class SlackService:
     def team_url(self):
         self._auth_user_id()   # ensures it's populated (cached)
         return self._team_url or ""
+
+    def _resolve_mentions(self, text):
+        """Rewrite bare ``<@U123>`` user mentions to ``<@U123|Display Name>`` (using the
+        cached name lookup) so the UI can render readable @names. Channel (``<#C…|name>``)
+        and special (``<!channel>``) tokens already carry a label / are handled client-side."""
+        if not text or "<@" not in text:
+            return text
+        return _MENTION_RE.sub(lambda m: f"<@{m.group(1)}|{self._user_name(m.group(1))}>", text)
 
     def _user_name(self, uid):
         if not uid:

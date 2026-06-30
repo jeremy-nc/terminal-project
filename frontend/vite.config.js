@@ -9,6 +9,9 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 5173,
+    // Allow access through tunnels (e.g. ngrok). A leading dot allows the domain
+    // and all its subdomains, so rotating ngrok URLs keep working.
+    allowedHosts: [".ngrok-free.dev", ".ngrok-free.app", ".ngrok.io"],
     proxy: {
       "/ws": {
         target: "ws://127.0.0.1:8000",

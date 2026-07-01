@@ -6,6 +6,7 @@ import {
 } from "../terminalController.js";
 import { getTheme } from "./world/themes/index.js";
 import { paintScreen, paintStandby, keyEventToBytes, EYE, makeClaude } from "./world/worldkit.js";
+import { useBranchTargets } from "./teamcityTargets.js";
 
 // Per-id hue so multiple visitors are distinguishable. Tints the avatar's clay-
 // coloured meshes (leaves the black eyes); clones the material so it's per-avatar.
@@ -30,13 +31,27 @@ function tintAvatar(group, id) {
  * room style, animation) is provided by a swappable `theme`; this component is the
  * theme-agnostic engine (controls, collision, portals, screen mirroring).
  */
-export default function WorldView({ stages, workspaceId, theme, onPortal, spawn }) {
+export default function WorldView({ stages, workspaceId, theme, branch, repo, onPortal, spawn }) {
   const hostRef = useRef(null);
   const stagesRef = useRef(stages);
   stagesRef.current = stages;
   const wsRef = useRef(workspaceId);
   wsRef.current = workspaceId;
   const S = useRef({});
+
+  // Optional CI/CD prop data (shared with the sidebar tiles): the resolved trigger
+  // configs + live status for this branch, plus a trigger fn. Stashed in refs so the
+  // imperative render loop can feed the theme's makeCicd (if any) without re-setup.
+  const { targets, recent, trigger } = useBranchTargets(branch, repo);
+  const targetsRef = useRef(targets);
+  targetsRef.current = targets;
+  const recentRef = useRef(recent);
+  recentRef.current = recent;
+  const triggerRef = useRef(null);
+  triggerRef.current = (key) => {
+    const t = (targetsRef.current || []).find((x) => x.key === key);
+    if (t) trigger(t);
+  };
   // The active theme module. Kept in a ref (updated every render) so the one-time
   // setup effect reads the latest theme at mount; switching theme rebuilds on the
   // next mount of the component.
@@ -85,6 +100,14 @@ export default function WorldView({ stages, workspaceId, theme, onPortal, spawn 
       sig: "",
     });
 
+    // Optional per-world CI/CD prop (e.g. the office CI/CD vending machine). Themes
+    // that don't implement makeCicd render nothing — the prop is entirely optional;
+    // the status data is available regardless (the sidebar tiles still show it).
+    if (themeMod.makeCicd) {
+      const cicd = themeMod.makeCicd(S.current.mats);
+      if (cicd) { scene.add(cicd.group); S.current.cicd = cicd; S.current.cicdWalls = cicd.walls || []; }
+    }
+
     // ── manual first-person controls ──────────────────────────────────────
     let yaw = 0, pitch = 0, locked = false;
     const keys = {};
@@ -95,7 +118,10 @@ export default function WorldView({ stages, workspaceId, theme, onPortal, spawn 
     // Enter typing on whatever screen the crosshair is currently aimed at. The
     // aim is computed each frame in the loop (and lights the crosshair), so the
     // click/E handlers just consume the latest result.
-    const tryEnterFromCenter = () => { if (S.current.aimTabId) enterTyping(S.current.aimTabId); };
+    const tryEnterFromCenter = () => {
+      if (S.current.aimTabId) { enterTyping(S.current.aimTabId); return; }
+      if (S.current.aimCicdKey && triggerRef.current) triggerRef.current(S.current.aimCicdKey);   // trigger a CI/CD config
+    };
     const enterTyping = (tabId) => {
       if (!tabId) return;
       typingRef.current = tabId;
@@ -177,8 +203,21 @@ export default function WorldView({ stages, workspaceId, theme, onPortal, spawn 
         const hits = ms.length ? raycaster.intersectObjects(ms, false) : [];
         if (hits.length && hits[0].distance < 12) aimTabId = hits[0].object.userData.screenTabId;
       }
+      // CI/CD machine buttons share the crosshair aim (only when not already aiming
+      // a screen). A hit lights the crosshair; click / E triggers that config.
+      let aimCicdKey = null;
+      if (!typing && locked && !aimTabId && S.current.cicd) {
+        const bs = S.current.cicd.buttons || [];
+        const meshes = bs.map((b) => b.mesh);
+        const chits = meshes.length ? raycaster.intersectObjects(meshes, false) : [];
+        if (chits.length && chits[0].distance < 6) {
+          const b = bs.find((x) => x.mesh === chits[0].object);
+          aimCicdKey = b ? b.key : null;
+        }
+      }
+      S.current.aimCicdKey = aimCicdKey;
       S.current.aimTabId = aimTabId;
-      if (crossRef.current) crossRef.current.classList.toggle("aim", !!aimTabId);
+      if (crossRef.current) crossRef.current.classList.toggle("aim", !!(aimTabId || aimCicdKey));
 
       const f = typing ? 0 : (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0);
       const r = typing ? 0 : (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
@@ -188,7 +227,7 @@ export default function WorldView({ stages, workspaceId, theme, onPortal, spawn 
         const dx = (fx * f + rx * r) * speed;
         const dz = (fz * f + rz * r) * speed;
         // Per-axis collision so you slide along walls; door gaps have no box.
-        const R = 0.35, walls = (S.current.walls || []).concat(S.current.treeWalls || []);
+        const R = 0.35, walls = (S.current.walls || []).concat(S.current.treeWalls || []).concat(S.current.cicdWalls || []);
         const hit = (px, pz) => {
           for (let i = 0; i < walls.length; i++) {
             const a = walls[i];
@@ -286,6 +325,19 @@ export default function WorldView({ stages, workspaceId, theme, onPortal, spawn 
         for (let i = 0; i < av.legs.length; i++) av.legs[i].rotation.x = Math.sin(av.phase + (i % 2) * Math.PI) * amp;
       });
 
+      // Optional CI/CD prop: feed it the latest TeamCity targets when they change,
+      // and animate it each frame (e.g. cans dropping into the pile).
+      if (S.current.cicd) {
+        const ts = targetsRef.current || [];
+        const sig = ts.map((t) => `${t.key}:${t.status ? `${t.status.state}:${t.status.status}:${t.status.id}` : "-"}`).join("|")
+          + "#" + ((recentRef.current || []).length);
+        if (sig !== S.current.cicdSig) {
+          S.current.cicdSig = sig;
+          S.current.cicd.update({ targets: ts, recent: recentRef.current || [] });
+        }
+        if (S.current.cicd.animate) S.current.cicd.animate(dt);
+      }
+
       // Per-frame theme animation (water drift, walking mascot, LED marquee, …).
       themeMod.animate(S.current, dt);
 
@@ -318,6 +370,7 @@ export default function WorldView({ stages, workspaceId, theme, onPortal, spawn 
       if (document.pointerLockElement === canvas) document.exitPointerLock();
       (S.current.avatars || new Map()).forEach((av) => scene.remove(av.group));
       S.current.avatars = new Map();
+      if (S.current.cicd) { scene.remove(S.current.cicd.group); S.current.cicd = null; }
       renderer.dispose();
       host.removeChild(canvas);
     };

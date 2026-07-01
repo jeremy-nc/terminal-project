@@ -454,6 +454,8 @@ export default function PipelineDashboard({ workspace, tabs, onPortal, worldEntr
                   stages={stages}
                   workspaceId={active.id}
                   theme={active.theme || "tropical"}
+                  branch={branch}
+                  repo={active?.meta?.repo || ""}
                   onPortal={onPortal}
                   spawn={worldEntry && worldEntry.workspaceId === active.id
                     ? { tree: worldEntry.tree, seq: worldEntry.seq } : null}

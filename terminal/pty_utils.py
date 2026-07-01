@@ -19,8 +19,9 @@ def fork_pty(argv: list, cols: int, rows: int, cwd: str = None) -> tuple:
 
     Shared by every terminal backend: the fork/exec mechanics are identical
     across backings — only the ``argv`` a backend hands in differs (a bare
-    shell vs. a ``tmux new-session`` wrapper). Falls back to bash if argv[0]
-    isn't found."""
+    shell vs. a ``tmux new-session`` wrapper). Falls back to the user's login
+    shell (zsh on modern macOS) if argv[0] isn't found — never the ancient
+    system bash, which would nag with the zsh-deprecation banner."""
     pid, fd = pty.fork()
     if pid == 0:  # child
         env = os.environ.copy()
@@ -35,7 +36,8 @@ def fork_pty(argv: list, cols: int, rows: int, cwd: str = None) -> tuple:
         try:
             os.execvpe(argv[0], argv, env)
         except FileNotFoundError:
-            os.execvpe("bash", ["bash"], env)
+            shell = resolve_shell(None)          # login shell (zsh), not the old system bash
+            os.execvpe(shell[0], shell, env)
         os._exit(1)
     # parent
     set_winsize(fd, rows, cols)

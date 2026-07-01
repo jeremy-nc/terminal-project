@@ -259,15 +259,32 @@ function _splitCommands(text) {
 
 /**
  * Parse a raw command string into { argv, cwd }.
- * If the last whitespace-separated token starts with '@', it is the cwd;
- * everything before it is the command.  Quoted paths (@"...") are supported.
+ *
+ * A command WRAPPED IN OUTER QUOTES ("…" or '…') is run through a login shell —
+ * `zsh -lc "…"` — so `~`, `$vars`, globs, pipes and escaped spaces all work like a
+ * normal terminal (an optional trailing ` @cwd` still sets the working dir). An
+ * UNQUOTED command is tokenised and exec'd directly (backwards-compatible), with a
+ * trailing `@` token as the cwd. Quoting only the first arg (`"my prog" a b`) falls
+ * through to the direct path.
  */
 function _parseCommand(cmd) {
+  const t = cmd.trim();
+  const q = t[0];
+  if (q === '"' || q === "'") {
+    const end = t.indexOf(q, 1);
+    if (end > 0) {
+      const after = t.slice(end + 1).trim();
+      if (after === "" || after.startsWith("@")) {          // whole command is wrapped → shell it
+        const inner = t.slice(1, end);
+        const cwd = after.startsWith("@") ? (after.slice(1).replace(/^["']|["']$/g, "") || null) : null;
+        return { argv: ["/bin/zsh", "-lc", inner], cwd };
+      }
+    }
+  }
   const tokens = _tokenize(cmd);
   if (tokens.length > 0 && tokens[tokens.length - 1].startsWith("@")) {
     const cwd = tokens[tokens.length - 1].slice(1); // strip leading '@'
-    const argv = tokens.slice(0, -1);
-    return { argv, cwd: cwd || null };
+    return { argv: tokens.slice(0, -1), cwd: cwd || null };
   }
   return { argv: tokens, cwd: null };
 }

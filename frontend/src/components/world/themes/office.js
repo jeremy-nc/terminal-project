@@ -426,6 +426,21 @@ function makeMonitor(tabId, label, mats, rng) {
   }
   g.add(mesh);
 
+  // Glassy CRT front: a faint reflective overlay just in front of the terminal so
+  // the screen catches the room / ceiling lights. ADDITIVE blending + a dielectric
+  // fresnel (metalness 0) means it only ADDS reflected light — brightest at grazing
+  // angles, near-invisible head-on — so the terminal text stays crisp and bright.
+  if (mats.screenEnv) {
+    const glass = new THREE.Mesh(new THREE.PlaneGeometry(SW, SH),
+      new THREE.MeshStandardMaterial({
+        color: 0x000000, metalness: 0.0, roughness: 0.07,
+        envMap: mats.screenEnv, envMapIntensity: 1.2,
+        transparent: true, blending: THREE.AdditiveBlending, depthWrite: false,
+      }));
+    glass.position.set(0, SCY, 0.0735);              // just proud of the terminal plane (0.072)
+    g.add(glass);
+  }
+
   // Beige bezel: thin top/sides, a deeper chin carrying buttons + power LED + logo.
   const mkbar = (w, h, x, y) => {
     const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.06), front);
@@ -929,6 +944,69 @@ function makeWaterCooler() {
 
 // ── theme ─────────────────────────────────────────────────────────────────────
 
+// Classic soda-machine front for the CI/CD prop: a branded blue/red panel with a big
+// vertical wordmark, and a right control column carrying the coin mech + the three
+// selection buttons. The 3D LED buttons are placed over the column button housings.
+const CICD_LABELS = ["BUILD", "DEV", "PROD"];   // short labels for the narrow column
+const CICD_KEYS = ["build", "rwd-apply", "rwp-plan"];
+const CICD_PANEL_W = 280, CICD_PANEL_H = 512;
+const CICD_COL_X = 196, CICD_COL_W = 74;        // right control-column rect (texture px)
+const CICD_ROWS_TY = [206, 296, 386];           // button-row centre-y in the column
+function _rr(g, x, y, w, h, r) {                // rounded-rect path helper
+  g.beginPath();
+  g.moveTo(x + r, y);
+  g.arcTo(x + w, y, x + w, y + h, r); g.arcTo(x + w, y + h, x, y + h, r);
+  g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r);
+  g.closePath();
+}
+function makeCicdPanel() {
+  const W = CICD_PANEL_W, H = CICD_PANEL_H;
+  const c = document.createElement("canvas"); c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  g.fillStyle = "#2a2d33"; g.fillRect(0, 0, W, H);              // metallic frame
+  // ── main branded panel (white border → blue top / red bottom) ──
+  const px = 10, py = 10, pw = 176, ph = H - 20;
+  _rr(g, px, py, pw, ph, 18); g.fillStyle = "#f2f2f0"; g.fill();
+  const ix = px + 12, iy = py + 12, iw = pw - 24, ih = ph - 24;
+  g.fillStyle = "#1a97e0"; g.fillRect(ix, iy, iw, ih / 2);
+  g.fillStyle = "#d62b2b"; g.fillRect(ix, iy + ih / 2, iw, ih / 2);
+  g.textAlign = "center"; g.textBaseline = "middle"; g.fillStyle = "#f6f6f4";
+  g.save(); g.translate(ix + iw * 0.60, iy + ih * 0.5); g.rotate(Math.PI / 2);  // vertical wordmark
+  g.font = "bold 96px Georgia, 'Times New Roman', serif"; g.fillText("CI/CD", 0, 0); g.restore();
+  g.save(); g.translate(ix + iw * 0.25, iy + ih * 0.62); g.rotate(Math.PI / 2);  // "Enjoy"
+  g.font = "italic 22px Georgia, serif"; g.fillText("Enjoy", 0, 0); g.restore();
+  // ── right control column: coin mech + price + three selection buttons ──
+  const cx = CICD_COL_X, cw = CICD_COL_W, mid = cx + cw / 2;
+  g.fillStyle = "#17191d"; g.fillRect(cx, 10, cw, H - 20);
+  // ── coin mechanism (metallic): coin-insert bezel, ".75" plate + red readout, coin return ──
+  g.fillStyle = "#b8bcc4"; _rr(g, cx + 6, 20, cw - 12, 106, 8); g.fill();
+  g.strokeStyle = "#6b6f77"; g.lineWidth = 2; g.stroke();
+  g.fillStyle = "#33363d"; _rr(g, cx + 15, 30, cw - 30, 30, 5); g.fill();       // insert bezel
+  g.fillStyle = "#0b0d10"; _rr(g, cx + 22, 41, cw - 44, 11, 3); g.fill();       // slot opening
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillStyle = "#e8e6df"; g.fillRect(cx + 13, 74, 22, 18);                     // ".75" white plate
+  g.fillStyle = "#111"; g.font = "bold 13px ui-monospace, monospace"; g.fillText(".75", cx + 24, 83);
+  g.fillStyle = "#240000"; g.fillRect(cx + 39, 74, cw - 51, 18);               // red readout (within the housing)
+  g.fillStyle = "#ff3b30"; g.font = "bold 10px ui-monospace, monospace"; g.fillText(".75", cx + 39 + (cw - 51) / 2, 83);
+  g.fillStyle = "#9aa0a8"; g.beginPath(); g.arc(mid, 110, 9, 0, Math.PI * 2); g.fill();  // coin return
+  g.strokeStyle = "#5a5e66"; g.lineWidth = 2; g.stroke();
+  g.strokeStyle = "#33363d"; g.beginPath(); g.arc(mid, 110, 4, 0, Math.PI * 2); g.stroke();
+  // ── selection buttons: brushed-metal sub-panel; each a white-bezel rectangular slot
+  //    (the 3D colour button drops into it), with a small caption above ──
+  g.fillStyle = "#5a5e66"; _rr(g, cx + 6, 148, cw - 12, H - 30 - 148, 8); g.fill();
+  g.strokeStyle = "#20232a"; g.lineWidth = 2; g.stroke();
+  g.textAlign = "center";
+  CICD_LABELS.forEach((lab, i) => {
+    const ty = CICD_ROWS_TY[i];
+    g.fillStyle = "#0d0f12"; g.font = "700 9px ui-monospace, monospace";
+    g.fillText(lab, mid, ty - 17);                                              // caption above
+    g.fillStyle = "#e9e7e0"; _rr(g, cx + 12, ty - 13, cw - 24, 26, 4); g.fill();  // white bezel
+    g.strokeStyle = "#8a8f98"; g.lineWidth = 1.5; g.stroke();
+  });
+  const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
+  return tex;
+}
+
 const office = {
   id: "office",
   label: "Retro Cubicles",
@@ -1054,6 +1132,17 @@ const office = {
     const roomsGroup = new THREE.Group();
     scene.add(roomsGroup);
 
+    // Reflection probe: render the room shell ONCE into a small cube map, shared by
+    // every CRT's glass overlay so the screens catch the ceiling lights / room.
+    // Captured here, before desks + monitors exist, so screens reflect the room (not
+    // each other) — no feedback, and just one cheap render.
+    const reflectRT = new THREE.WebGLCubeRenderTarget(256);
+    const reflectCam = new THREE.CubeCamera(0.1, 80, reflectRT);
+    reflectCam.position.set(0, 2.2, 0);   // mid-room, near the ceiling troffers
+    scene.add(reflectCam);
+    reflectCam.update(renderer, scene);
+    shared.screenEnv = reflectRT.texture;
+
     // Mild bloom for the CRT phosphor glow + ceiling panels (high threshold so only
     // the bright bits bloom — keeps the flat office look elsewhere).
     const composer = new EffectComposer(renderer);
@@ -1128,6 +1217,170 @@ const office = {
       b.position.y += dt * 0.35;
       if (b.position.y > 1.45) b.position.y = 1.08;
     }
+  },
+
+  // Optional CI/CD prop: a drink vending machine. Build/Dev/Prod buttons (LED = live
+  // build status, click to trigger), and each build drops in as a coloured can — a
+  // pile of history on the floor, a fresh can dispensed when a build finishes. Fed
+  // the resolved TeamCity targets by the engine; renders nothing for other worlds.
+  makeCicd(mats) {   // eslint-disable-line no-unused-vars
+    const g = new THREE.Group();
+    g.position.set(-ROOM_HALF + 0.7, 0, ROOM_HALF - 6);
+    g.rotation.y = Math.PI / 2;                     // front faces +X, into the room
+
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.1, 2.0, 0.75),
+      new THREE.MeshStandardMaterial({ color: 0x2a2d33, roughness: 0.5, metalness: 0.2 }));
+    body.position.set(0, 1.0, 0); g.add(body);
+    const panel = new THREE.Mesh(new THREE.PlaneGeometry(1.08, 1.96),
+      new THREE.MeshStandardMaterial({ map: makeCicdPanel(), roughness: 0.6 }));
+    panel.position.set(0, 1.0, 0.376); g.add(panel);
+
+    const COLOR = { ok: 0x4caf72, bad: 0xff6b6b, run: 0x6c9ae7, queue: 0xd9b144, none: 0x565961 };
+    // Rectangular colour buttons that drop into the white bezels (soda-machine style).
+    const ROWS_Y = [1.195, 0.844, 0.492], BX = 0.365, BZ = 0.40;
+    const buttons = [], btnByKey = {};
+    CICD_KEYS.forEach((key, i) => {
+      const m = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.075, 0.022),
+        new THREE.MeshStandardMaterial({ color: COLOR.none, roughness: 0.4 }));
+      m.position.set(BX, ROWS_Y[i], BZ);
+      g.add(m); buttons.push({ mesh: m, key }); btnByKey[key] = m;
+    });
+    // Dispensing tray at the bottom of the main branded panel (cans pop out here).
+    const tray = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.26, 0.09),
+      new THREE.MeshStandardMaterial({ color: 0x0c0d10, roughness: 0.9 }));
+    tray.position.set(-0.165, 0.36, 0.35); g.add(tray);
+    const TRAY = { x: -0.165, y: 0.40 };
+
+    const cx = g.position.x, cz = g.position.z;
+    const walls = [{ minX: cx - 0.4, maxX: cx + 0.4, minZ: cz - 0.58, maxZ: cz + 0.58 }];
+
+    // Each build is a can in the floor pile (positions are random per session). A can
+    // is a coloured label body + shiny aluminium neck-taper, lid, and base ring.
+    const CAN_R = 0.058, CAN_H = 0.13;
+    const _bodyGeo = new THREE.CylinderGeometry(CAN_R, CAN_R, CAN_H, 18);
+    const _neckGeo = new THREE.CylinderGeometry(CAN_R * 0.8, CAN_R, 0.022, 18);   // taper to the lid
+    const _lidGeo = new THREE.CylinderGeometry(CAN_R * 0.8, CAN_R * 0.8, 0.006, 18);
+    const _baseGeo = new THREE.CylinderGeometry(CAN_R, CAN_R * 0.86, 0.014, 18);  // base rim
+    const _alu = new THREE.MeshStandardMaterial({ color: 0xd8dade, metalness: 0.9, roughness: 0.32 });
+    const cans = [];
+    const SK = (b) => !b ? "none"
+      : b.state === "running" ? "run" : b.state === "queued" ? "queue"
+      : b.status === "SUCCESS" ? "ok" : b.status === "FAILURE" ? "bad" : "none";
+    // Lightweight physics: cans fall, bounce, and shove each other so they never
+    // intersect. Each is a body { mesh, vx, vy, vz, asleep }; a settled can sleeps
+    // until something knocks it. CAN_COLR is the floor-plane radius (cans rest
+    // ~2·CAN_COLR apart); BND keeps the pile in front of the machine.
+    const CAN_COLR = 0.072;
+    const BND = { x0: TRAY.x - 0.42, x1: TRAY.x + 0.42, z0: 0.44, z1: 1.55 };
+    const freeSpot = () => {                          // a non-overlapping resting spot (seeded history)
+      for (let t = 0; t < 40; t++) {
+        const px = TRAY.x + (Math.random() - 0.5) * 0.72, pz = 0.55 + Math.random() * 0.85;
+        if (!cans.some((c) => { const dx = c.mesh.position.x - px, dz = c.mesh.position.z - pz; return dx * dx + dz * dz < (2 * CAN_COLR) ** 2; }))
+          return { x: px, z: pz };
+      }
+      return { x: TRAY.x + (Math.random() - 0.5) * 0.72, z: 0.55 + Math.random() * 0.85 };
+    };
+    const makeCan = (sk, dispensed) => {
+      if (cans.length > 26) { const old = cans.shift(); g.remove(old.mesh); }
+      const grp = new THREE.Group();
+      const bodyMat = new THREE.MeshStandardMaterial({ color: COLOR[sk] || COLOR.none, metalness: 0.35, roughness: 0.35 });
+      grp.add(new THREE.Mesh(_bodyGeo, bodyMat));                      // coloured label
+      const neck = new THREE.Mesh(_neckGeo, _alu); neck.position.y = CAN_H / 2 + 0.011; grp.add(neck);
+      const lid = new THREE.Mesh(_lidGeo, _alu); lid.position.y = CAN_H / 2 + 0.025; grp.add(lid);
+      const base = new THREE.Mesh(_baseGeo, _alu); base.position.y = -CAN_H / 2 - 0.007; grp.add(base);
+      grp.userData.bodyMat = bodyMat;                                  // recoloured when the build ends
+      grp.rotation.set(Math.PI / 2, 0, Math.random() * Math.PI);       // lying down, random roll
+      let can;
+      if (dispensed) {                                                 // pops from the tray with an arc
+        grp.position.set(TRAY.x, TRAY.y, 0.44);
+        can = { mesh: grp, vx: (Math.random() - 0.5) * 0.3, vy: 0.5, vz: 0.9 + Math.random() * 0.4, asleep: false };
+      } else {                                                         // seeded history — settled, non-overlapping
+        const s = freeSpot();
+        grp.position.set(s.x, CAN_R, s.z);
+        can = { mesh: grp, vx: 0, vy: 0, vz: 0, asleep: true };
+      }
+      g.add(grp);
+      cans.push(can);
+      return grp;
+    };
+
+    let seeded = false;
+    const curId = {};      // key -> build id already represented by a can
+    const active = {};     // key -> { can, id } the in-flight (running) can, recoloured on finish
+    return {
+      group: g, buttons, walls,
+      update({ targets, recent }) {
+        for (const t of (targets || [])) {          // button LED = live status
+          const m = btnByKey[t.key]; if (!m) continue;
+          const sk = SK(t.status);
+          m.material.color.setHex(COLOR[sk] || COLOR.none);
+          m.material.emissive.setHex(sk === "none" ? 0x000000 : (COLOR[sk] || 0x000000));
+          m.material.emissiveIntensity = sk === "none" ? 0 : 0.55;
+        }
+        if (!seeded) {                               // first pass: seed history, note current builds
+          seeded = true;
+          for (const b of (recent || []).slice(0, 18)) makeCan(SK(b), false);   // settled history pile
+          for (const t of (targets || [])) if (t.status) curId[t.key] = t.status.id;
+          return;
+        }
+        for (const t of (targets || [])) {
+          const b = t.status; if (!b) continue;
+          const sk = SK(b), id = b.id;
+          const tr = active[t.key];
+          if (tr && tr.id === id) {                   // the can we popped for this build:
+            tr.can.userData.bodyMat.color.setHex(COLOR[sk] || COLOR.none);   // keep its colour in sync (run → finished)
+            if (sk !== "run" && sk !== "queue") active[t.key] = null; // settled → stop tracking
+          } else if (sk === "run") {                  // ENTERED running → pop a can from the slot
+            if (curId[t.key] !== id) { active[t.key] = { can: makeCan("run", true), id }; curId[t.key] = id; }
+          } else if ((sk === "ok" || sk === "bad") && curId[t.key] !== id) {
+            makeCan(sk, true); curId[t.key] = id;     // finished so fast we never saw it run → drop one now
+          }
+        }
+      },
+      animate(dt) {
+        const h = Math.min(dt, 0.033);                // clamp the step for stability
+        const G = -3.4, FLOOR = CAN_R, REST = 0.36, GF = 0.8;
+        // Integrate gravity, bounce off the floor, reflect at the pile bounds.
+        for (const c of cans) {
+          if (c.asleep) continue;
+          c.vy += G * h;
+          const p = c.mesh.position;
+          p.x += c.vx * h; p.y += c.vy * h; p.z += c.vz * h;
+          if (p.y < FLOOR) { p.y = FLOOR; if (c.vy < 0) c.vy = -c.vy * REST; c.vx *= GF; c.vz *= GF; }
+          if (p.x < BND.x0) { p.x = BND.x0; c.vx = Math.abs(c.vx) * 0.4; }
+          if (p.x > BND.x1) { p.x = BND.x1; c.vx = -Math.abs(c.vx) * 0.4; }
+          if (p.z < BND.z0) { p.z = BND.z0; c.vz = Math.abs(c.vz) * 0.4; }
+          if (p.z > BND.z1) { p.z = BND.z1; c.vz = -Math.abs(c.vz) * 0.4; }
+        }
+        // Can-can collisions (XZ plane): separate any overlap and knock the other
+        // can along the contact normal. A couple of relaxation passes for stability.
+        const minD = CAN_COLR * 2;
+        for (let it = 0; it < 2; it++) {
+          for (let i = 0; i < cans.length; i++) {
+            for (let j = i + 1; j < cans.length; j++) {
+              const ci = cans[i], cj = cans[j], a = ci.mesh.position, b = cj.mesh.position;
+              const dx = b.x - a.x, dz = b.z - a.z, d2 = dx * dx + dz * dz;
+              if (d2 >= minD * minD) continue;
+              const d = Math.sqrt(d2) || 1e-4, nx = dx / d, nz = dz / d, ov = (minD - d) * 0.5;
+              a.x -= nx * ov; a.z -= nz * ov; b.x += nx * ov; b.z += nz * ov;   // separate
+              const rvn = (cj.vx - ci.vx) * nx + (cj.vz - ci.vz) * nz;          // approaching speed
+              if (rvn < 0) {                                                     // knock
+                const imp = -rvn * 0.5;
+                ci.vx -= nx * imp; ci.vz -= nz * imp; cj.vx += nx * imp; cj.vz += nz * imp;
+                ci.asleep = false; cj.asleep = false;
+              }
+            }
+          }
+        }
+        // Put nearly-stationary grounded cans to sleep (cheap + stable pile).
+        for (const c of cans) {
+          if (c.asleep) continue;
+          if (c.vx * c.vx + c.vy * c.vy + c.vz * c.vz < 0.0004 && c.mesh.position.y <= FLOOR + 0.003) {
+            c.vx = c.vy = c.vz = 0; c.asleep = true;
+          }
+        }
+      },
+    };
   },
 };
 

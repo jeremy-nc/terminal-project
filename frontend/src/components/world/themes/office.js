@@ -951,7 +951,7 @@ const CICD_LABELS = ["BUILD", "DEV", "PROD"];   // short labels for the narrow c
 const CICD_KEYS = ["build", "rwd-apply", "rwp-plan"];
 const CICD_PANEL_W = 280, CICD_PANEL_H = 512;
 const CICD_COL_X = 196, CICD_COL_W = 74;        // right control-column rect (texture px)
-const CICD_ROWS_TY = [206, 296, 386];           // button-row centre-y in the column
+const CICD_ROWS_TY = [182, 244, 306];           // button-row centre-y (clustered near the top)
 function _rr(g, x, y, w, h, r) {                // rounded-rect path helper
   g.beginPath();
   g.moveTo(x + r, y);
@@ -959,6 +959,153 @@ function _rr(g, x, y, w, h, r) {                // rounded-rect path helper
   g.arcTo(x, y + h, x, y, r); g.arcTo(x, y, x + w, y, r);
   g.closePath();
 }
+// Weathered brushed-metal patina into a rect: base tone + fine horizontal grain,
+// grimy oxidation blotches (greenish / rust-brown), and a few scratches — so the
+// machine's metal reads as aged rather than flat.
+function _patina(g, x, y, w, h, base) {
+  g.save();
+  g.beginPath(); g.rect(x, y, w, h); g.clip();
+  g.fillStyle = base; g.fillRect(x, y, w, h);
+  for (let yy = 0; yy < h; yy += 2) {                          // brushed grain
+    g.strokeStyle = `rgba(255,255,255,${0.015 + Math.random() * 0.03})`;
+    g.beginPath(); g.moveTo(x, y + yy + 0.5); g.lineTo(x + w, y + yy + 0.5); g.stroke();
+  }
+  const blobs = Math.max(6, (w * h) / 550);
+  for (let i = 0; i < blobs; i++) {                            // oxidation / grime
+    const bx = x + Math.random() * w, by = y + Math.random() * h, r = 2 + Math.random() * 7;
+    const rg = g.createRadialGradient(bx, by, 0, bx, by, r);
+    const tint = Math.random() < 0.5 ? "70,78,68" : "52,46,40";   // patina green / rust
+    rg.addColorStop(0, `rgba(${tint},${0.08 + Math.random() * 0.16})`);
+    rg.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = rg; g.beginPath(); g.arc(bx, by, r, 0, Math.PI * 2); g.fill();
+  }
+  for (let i = 0; i < 5; i++) {                                // scratches
+    g.strokeStyle = `rgba(230,235,240,${0.05 + Math.random() * 0.1})`; g.lineWidth = 0.7;
+    const sx = x + Math.random() * w, sy = y + Math.random() * h;
+    g.beginPath(); g.moveTo(sx, sy); g.lineTo(sx + (Math.random() - 0.5) * 24, sy + (Math.random() - 0.5) * 8); g.stroke();
+  }
+  g.restore();
+}
+
+// Weathered painted-metal texture for the machine body: dark navy-black paint with
+// faded mottling, worn light patches (paint rubbed to dull metal), scuffs/scratches,
+// a dusty bottom, and grime drips — matching a well-used old vending machine.
+function makeBodyPatina() {
+  const W = 256, H = 512, c = document.createElement("canvas"); c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  g.fillStyle = "#1c2027"; g.fillRect(0, 0, W, H);                        // dark navy-black paint
+  const blob = (x, y, r, col) => { const rg = g.createRadialGradient(x, y, 0, x, y, r); rg.addColorStop(0, col); rg.addColorStop(1, "rgba(0,0,0,0)"); g.fillStyle = rg; g.beginPath(); g.arc(x, y, r, 0, Math.PI * 2); g.fill(); };
+  for (let i = 0; i < 40; i++) {                                          // faded mottling
+    const light = Math.random() < 0.5;
+    blob(Math.random() * W, Math.random() * H, 20 + Math.random() * 70,
+      light ? `rgba(70,76,86,${0.05 + Math.random() * 0.08})` : `rgba(8,9,12,${0.06 + Math.random() * 0.1})`);
+  }
+  for (let i = 0; i < 26; i++) {                                          // worn patches → dull metal
+    blob(Math.random() * W, Math.random() * H, 4 + Math.random() * 15, `rgba(118,124,132,${0.1 + Math.random() * 0.18})`);
+  }
+  for (let i = 0; i < 95; i++) {                                          // scuffs / scratches
+    const x = Math.random() * W, y = Math.random() * H;
+    const len = 6 + Math.random() * 60, ang = (Math.random() - 0.5) * (Math.random() < 0.5 ? 0.5 : 2.6);
+    g.strokeStyle = `rgba(190,196,205,${0.04 + Math.random() * 0.12})`;
+    g.lineWidth = 0.6 + Math.random() * 0.8;
+    g.beginPath(); g.moveTo(x, y); g.lineTo(x + Math.cos(ang) * len, y + Math.sin(ang) * len); g.stroke();
+  }
+  const dust = g.createLinearGradient(0, H * 0.6, 0, H);                  // dusty toward the bottom
+  dust.addColorStop(0, "rgba(0,0,0,0)"); dust.addColorStop(1, "rgba(150,146,138,0.13)");
+  g.fillStyle = dust; g.fillRect(0, H * 0.6, W, H * 0.4);
+  for (let i = 0; i < 8; i++) {                                           // grime drips
+    const sx = Math.random() * W, grd = g.createLinearGradient(sx, 0, sx, H);
+    grd.addColorStop(0, "rgba(0,0,0,0)"); grd.addColorStop(0.5, `rgba(6,7,9,${0.1 + Math.random() * 0.15})`); grd.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = grd; g.fillRect(sx, 0, 1.5 + Math.random() * 4, H);
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace;
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  return t;
+}
+
+// White printed label (config name) for a selection button — sits on the glossy
+// button face like the brand labels behind the clear plastic. Transparent bg, dark
+// outline so it reads on any status colour.
+function _cicdLabelTex(name) {
+  const c = document.createElement("canvas"); c.width = 128; c.height = 56;
+  const g = c.getContext("2d");
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.font = "800 30px Georgia, 'Arial Black', sans-serif";
+  g.lineWidth = 5; g.strokeStyle = "rgba(0,0,0,0.6)"; g.strokeText(name, 64, 30);
+  g.fillStyle = "#ffffff"; g.fillText(name, 64, 30);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  return t;
+}
+
+// Seven-segment display: draw digits/dots the way a digital clock does, so the price
+// readout reads as a real LED. Lit segments bright red, off segments a faint ghost.
+const SEG7 = { "0": "abcdef", "1": "bc", "2": "abdeg", "3": "abcdg", "4": "bcfg",
+  "5": "acdfg", "6": "acdefg", "7": "abc", "8": "abcdefg", "9": "abcdfg" };
+function _seg7(g, x, y, w, h, on, onC, offC) {
+  const t = Math.max(2, w * 0.16), mid = y + h / 2;
+  const bar = (bx, by, bw, bh, lit) => { g.fillStyle = lit ? onC : offC; _rr(g, bx, by, bw, bh, Math.min(bw, bh) / 2); g.fill(); };
+  bar(x + t * 0.6, y, w - t * 1.2, t, on.has("a"));                 // a top
+  bar(x + t * 0.6, mid - t / 2, w - t * 1.2, t, on.has("g"));       // g middle
+  bar(x + t * 0.6, y + h - t, w - t * 1.2, t, on.has("d"));         // d bottom
+  bar(x, y + t * 0.6, t, h / 2 - t * 0.9, on.has("f"));             // f top-left
+  bar(x + w - t, y + t * 0.6, t, h / 2 - t * 0.9, on.has("b"));     // b top-right
+  bar(x, mid + t * 0.3, t, h / 2 - t * 0.9, on.has("e"));           // e bottom-left
+  bar(x + w - t, mid + t * 0.3, t, h / 2 - t * 0.9, on.has("c"));   // c bottom-right
+}
+// `glyphs`: digits + "." + "G" (a ghost/unlit digit — all segments off). Rendered
+// RIGHT-ALIGNED, like a real price LED where the leading digit sits dark.
+function _makeSegTex(glyphs) {
+  const W = 168, H = 56, c = document.createElement("canvas"); c.width = W; c.height = H;
+  const g = c.getContext("2d");
+  g.fillStyle = "#160b0b"; g.fillRect(0, 0, W, H);
+  const on = "#ff4438", off = "rgba(120,22,18,0.3)", dw = 26, dh = 42, gap = 7, dotW = 13, y = (H - dh) / 2;
+  let total = 0;
+  for (const ch of glyphs) total += (ch === "." ? dotW : dw + gap);
+  total -= gap;                              // no trailing gap
+  let x = W - 10 - total;                    // right-aligned: units digit sits at the right
+  for (const ch of glyphs) {
+    if (ch === ".") { g.fillStyle = on; g.beginPath(); g.arc(x + 4, y + dh - 3, 4, 0, Math.PI * 2); g.fill(); x += dotW; }
+    else { _seg7(g, x, y, dw, dh, new Set(ch === "G" ? "" : (SEG7[ch] || "")), on, off); x += dw + gap; }
+  }
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 8;
+  return t;
+}
+
+// Ages the printed sign in place: dark dirt speckles, grime blotches, rust drips
+// (optional), and light/dark scuffs — matching a filthy old machine front.
+function _grunge(g, x, y, w, h, rust) {
+  g.save(); g.beginPath(); g.rect(x, y, w, h); g.clip();
+  for (let i = 0; i < (w * h) / 240; i++) {                              // dirt speckles
+    const px = x + Math.random() * w, py = y + Math.random() * h;
+    g.fillStyle = `rgba(18,14,10,${0.12 + Math.random() * 0.4})`;
+    g.beginPath(); g.arc(px, py, 0.4 + Math.random() * 1.7, 0, Math.PI * 2); g.fill();
+  }
+  for (let i = 0; i < (w * h) / 3000; i++) {                             // grime blotches
+    const px = x + Math.random() * w, py = y + Math.random() * h, r = 10 + Math.random() * 30;
+    const rg = g.createRadialGradient(px, py, 0, px, py, r);
+    rg.addColorStop(0, `rgba(58,50,38,${0.05 + Math.random() * 0.1})`); rg.addColorStop(1, "rgba(0,0,0,0)");
+    g.fillStyle = rg; g.beginPath(); g.arc(px, py, r, 0, Math.PI * 2); g.fill();
+  }
+  if (rust) for (let i = 0; i < 3 + Math.floor(Math.random() * 3); i++) { // rust drips from the top
+    let sx = x + 24 + Math.random() * (w - 48);
+    const len = h * (0.25 + Math.random() * 0.5), wdt = 2 + Math.random() * 6;
+    for (let yy = 0; yy < len; yy += 3) {
+      sx += (Math.random() - 0.5) * 1.3;
+      const a = (0.4 - 0.4 * (yy / len)) * (0.6 + Math.random() * 0.4);
+      g.fillStyle = `rgba(${(135 + Math.random() * 40) | 0},${(58 + Math.random() * 24) | 0},${(26 + Math.random() * 14) | 0},${a})`;
+      g.fillRect(sx, y + yy, Math.max(1, wdt * (1 - 0.4 * yy / len)), 3);
+    }
+  }
+  for (let i = 0; i < (w * h) / 1100; i++) {                             // scuffs
+    const px = x + Math.random() * w, py = y + Math.random() * h;
+    const len = 5 + Math.random() * 36, ang = (Math.random() - 0.5) * 2.5, light = Math.random() < 0.5;
+    g.strokeStyle = light ? `rgba(232,232,226,${0.05 + Math.random() * 0.1})` : `rgba(14,11,9,${0.07 + Math.random() * 0.13})`;
+    g.lineWidth = 0.5 + Math.random() * 0.8;
+    g.beginPath(); g.moveTo(px, py); g.lineTo(px + Math.cos(ang) * len, py + Math.sin(ang) * len); g.stroke();
+  }
+  g.restore();
+}
+
 function makeCicdPanel() {
   const W = CICD_PANEL_W, H = CICD_PANEL_H;
   const c = document.createElement("canvas"); c.width = W; c.height = H;
@@ -966,43 +1113,48 @@ function makeCicdPanel() {
   g.fillStyle = "#2a2d33"; g.fillRect(0, 0, W, H);              // metallic frame
   // ── main branded panel (white border → blue top / red bottom) ──
   const px = 10, py = 10, pw = 176, ph = H - 20;
-  _rr(g, px, py, pw, ph, 18); g.fillStyle = "#f2f2f0"; g.fill();
+  _rr(g, px, py, pw, ph, 18); g.fillStyle = "#e7e2d4"; g.fill();               // aged cream border
   const ix = px + 12, iy = py + 12, iw = pw - 24, ih = ph - 24;
-  g.fillStyle = "#1a97e0"; g.fillRect(ix, iy, iw, ih / 2);
-  g.fillStyle = "#d62b2b"; g.fillRect(ix, iy + ih / 2, iw, ih / 2);
-  g.textAlign = "center"; g.textBaseline = "middle"; g.fillStyle = "#f6f6f4";
+  g.fillStyle = "#2f82b0"; g.fillRect(ix, iy, iw, ih / 2);                     // faded blue
+  g.fillStyle = "#b5372f"; g.fillRect(ix, iy + ih / 2, iw, ih / 2);           // faded red
+  g.textAlign = "center"; g.textBaseline = "middle"; g.fillStyle = "#efece2";
   g.save(); g.translate(ix + iw * 0.60, iy + ih * 0.5); g.rotate(Math.PI / 2);  // vertical wordmark
   g.font = "bold 96px Georgia, 'Times New Roman', serif"; g.fillText("CI/CD", 0, 0); g.restore();
   g.save(); g.translate(ix + iw * 0.25, iy + ih * 0.62); g.rotate(Math.PI / 2);  // "Enjoy"
   g.font = "italic 22px Georgia, serif"; g.fillText("Enjoy", 0, 0); g.restore();
+  g.fillStyle = "rgba(150,144,128,0.1)"; g.fillRect(ix, iy, iw, ih);           // dusty film over the colours
   // ── right control column: coin mech + price + three selection buttons ──
   const cx = CICD_COL_X, cw = CICD_COL_W, mid = cx + cw / 2;
   g.fillStyle = "#17191d"; g.fillRect(cx, 10, cw, H - 20);
-  // ── coin mechanism (metallic): coin-insert bezel, ".75" plate + red readout, coin return ──
-  g.fillStyle = "#b8bcc4"; _rr(g, cx + 6, 20, cw - 12, 106, 8); g.fill();
-  g.strokeStyle = "#6b6f77"; g.lineWidth = 2; g.stroke();
-  g.fillStyle = "#33363d"; _rr(g, cx + 15, 30, cw - 30, 30, 5); g.fill();       // insert bezel
-  g.fillStyle = "#0b0d10"; _rr(g, cx + 22, 41, cw - 44, 11, 3); g.fill();       // slot opening
+  // ── coin mechanism: patina housing, red 1.00 display, beveled coin-insert + slot, coin return ──
+  _patina(g, cx + 6, 20, cw - 12, 108, "#aab0b8");
+  g.strokeStyle = "#5c6067"; g.lineWidth = 2; _rr(g, cx + 6, 20, cw - 12, 108, 8); g.stroke();
   g.textAlign = "center"; g.textBaseline = "middle";
-  g.fillStyle = "#e8e6df"; g.fillRect(cx + 13, 74, 22, 18);                     // ".75" white plate
-  g.fillStyle = "#111"; g.font = "bold 13px ui-monospace, monospace"; g.fillText(".75", cx + 24, 83);
-  g.fillStyle = "#240000"; g.fillRect(cx + 39, 74, cw - 51, 18);               // red readout (within the housing)
-  g.fillStyle = "#ff3b30"; g.font = "bold 10px ui-monospace, monospace"; g.fillText(".75", cx + 39 + (cw - 51) / 2, 83);
-  g.fillStyle = "#9aa0a8"; g.beginPath(); g.arc(mid, 110, 9, 0, Math.PI * 2); g.fill();  // coin return
-  g.strokeStyle = "#5a5e66"; g.lineWidth = 2; g.stroke();
-  g.strokeStyle = "#33363d"; g.beginPath(); g.arc(mid, 110, 4, 0, Math.PI * 2); g.stroke();
-  // ── selection buttons: brushed-metal sub-panel; each a white-bezel rectangular slot
-  //    (the 3D colour button drops into it), with a small caption above ──
-  g.fillStyle = "#5a5e66"; _rr(g, cx + 6, 148, cw - 12, H - 30 - 148, 8); g.fill();
-  g.strokeStyle = "#20232a"; g.lineWidth = 2; g.stroke();
-  g.textAlign = "center";
-  CICD_LABELS.forEach((lab, i) => {
-    const ty = CICD_ROWS_TY[i];
-    g.fillStyle = "#0d0f12"; g.font = "700 9px ui-monospace, monospace";
-    g.fillText(lab, mid, ty - 17);                                              // caption above
-    g.fillStyle = "#e9e7e0"; _rr(g, cx + 12, ty - 13, cw - 24, 26, 4); g.fill();  // white bezel
-    g.strokeStyle = "#8a8f98"; g.lineWidth = 1.5; g.stroke();
+  g.fillStyle = "#c6ccd2"; _rr(g, cx + 12, 54, cw - 24, 40, 5); g.fill();       // coin-insert bezel face
+  g.strokeStyle = "#eef0f2"; g.lineWidth = 1.5; _rr(g, cx + 12, 54, cw - 24, 40, 5); g.stroke();   // top highlight
+  _patina(g, cx + 15, 57, cw - 30, 26, "#b4bac0");                              // brushed insert
+  g.fillStyle = "#5c6067"; g.fillRect(cx + 13, 92, cw - 26, 2);                 // bottom shadow line
+  g.fillStyle = "#0a0c0f"; _rr(g, cx + 24, 63, cw - 48, 13, 3); g.fill();       // coin slot (dark)
+  g.fillStyle = "#33373d"; g.fillRect(cx + 26, 65, cw - 52, 2);                 // slot bevel highlight
+  g.fillStyle = "#2b2e34"; g.font = "600 6px ui-monospace, monospace"; g.fillText("INSERT COIN", mid, 87);
+  g.fillStyle = "#9aa0a8"; _rr(g, cx + 18, 100, cw - 36, 15, 3); g.fill();      // coin-return button
+  g.strokeStyle = "#5c6067"; g.lineWidth = 1; g.stroke();
+  g.fillStyle = "#2b2e34"; g.font = "600 6px ui-monospace, monospace"; g.fillText("COIN RETURN", mid, 108);
+  // ── selection buttons: patina metal sub-panel; each a metal-framed white bezel that
+  //    the 3D colour button drops into, with a small caption above ──
+  _patina(g, cx + 6, 148, cw - 12, H - 30 - 148, "#8f959c");
+  g.strokeStyle = "#3a3d44"; g.lineWidth = 2; _rr(g, cx + 6, 148, cw - 12, H - 30 - 148, 8); g.stroke();
+  CICD_ROWS_TY.forEach((ty) => {                                                // dark plastic bezels (button wells)
+    g.fillStyle = "#0c0e11"; _rr(g, cx + 8, ty - 19, cw - 16, 38, 6); g.fill(); // black plastic frame
+    g.strokeStyle = "rgba(255,255,255,0.14)"; g.lineWidth = 1.5;                // bevel highlight
+    _rr(g, cx + 9, ty - 18, cw - 18, 36, 5); g.stroke();
+    g.fillStyle = "#050607"; _rr(g, cx + 13, ty - 14, cw - 26, 28, 3); g.fill();// recessed well
   });
+  // Age the whole front: heavy dirt + rust drips on the branded sign, lighter grime
+  // over the control column (its metal is already patina'd).
+  _grunge(g, px, py, pw, ph, true);
+  _grunge(g, cx, 10, cw, H - 20, false);
+  g.clearRect(55, 407, 86, 63);   // punch the can-chute opening (transparent → the recess shows through, via alphaTest)
   const tex = new THREE.CanvasTexture(c); tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
   return tex;
 }
@@ -1228,28 +1380,94 @@ const office = {
     g.position.set(-ROOM_HALF + 0.7, 0, ROOM_HALF - 6);
     g.rotation.y = Math.PI / 2;                     // front faces +X, into the room
 
-    const body = new THREE.Mesh(new THREE.BoxGeometry(1.1, 2.0, 0.75),
-      new THREE.MeshStandardMaterial({ color: 0x2a2d33, roughness: 0.5, metalness: 0.2 }));
+    // Body is a touch shallower so the branded front stands proud — giving real depth
+    // for the can chute to recess back into (the front face at 0.34, panel at 0.376).
+    const body = new THREE.Mesh(new THREE.BoxGeometry(1.1, 2.0, 0.68),
+      new THREE.MeshStandardMaterial({ map: makeBodyPatina(), color: 0xffffff, roughness: 0.72, metalness: 0.15 }));
     body.position.set(0, 1.0, 0); g.add(body);
+    // The front sign; alphaTest lets the can-chute opening be punched out (see makeCicdPanel).
     const panel = new THREE.Mesh(new THREE.PlaneGeometry(1.08, 1.96),
-      new THREE.MeshStandardMaterial({ map: makeCicdPanel(), roughness: 0.6 }));
+      new THREE.MeshStandardMaterial({ map: makeCicdPanel(), roughness: 0.6, alphaTest: 0.5 }));
     panel.position.set(0, 1.0, 0.376); g.add(panel);
+    // Door edge: connects the proud panel to the shallower body so it reads as a plaque.
+    const edgeMat = new THREE.MeshStandardMaterial({ color: 0x1c2027, roughness: 0.7 });
+    const edge = (w, h, x, y) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.04), edgeMat); m.position.set(x, y, 0.357); g.add(m); };
+    edge(1.12, 0.02, 0, 1.975); edge(1.12, 0.02, 0, 0.025); edge(0.02, 1.96, -0.55, 1.0); edge(0.02, 1.96, 0.55, 1.0);
 
     const COLOR = { ok: 0x4caf72, bad: 0xff6b6b, run: 0x6c9ae7, queue: 0xd9b144, none: 0x565961 };
-    // Rectangular colour buttons that drop into the white bezels (soda-machine style).
-    const ROWS_Y = [1.195, 0.844, 0.492], BX = 0.365, BZ = 0.40;
+    // Glossy plastic push-buttons (status colour) with a printed label, seated in the
+    // dark wells — the clear-plastic sheen comes from clearcoat + the room reflection.
+    const ROWS_Y = [1.283, 1.046, 0.809], BX = 0.365, BZ = 0.40;   // match CICD_ROWS_TY (top-clustered)
+    const BTN_LABELS = ["BUILD", "DEV", "PROD"];
+    const btnGeo = new THREE.BoxGeometry(0.185, 0.088, 0.024);
+    const labGeo = new THREE.PlaneGeometry(0.16, 0.07);
     const buttons = [], btnByKey = {};
     CICD_KEYS.forEach((key, i) => {
-      const m = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.075, 0.022),
-        new THREE.MeshStandardMaterial({ color: COLOR.none, roughness: 0.4 }));
+      const m = new THREE.Mesh(btnGeo, new THREE.MeshPhysicalMaterial({
+        color: COLOR.none, roughness: 0.28, clearcoat: 1.0, clearcoatRoughness: 0.18,
+        envMap: mats.screenEnv || null, envMapIntensity: 0.7,
+      }));
       m.position.set(BX, ROWS_Y[i], BZ);
-      g.add(m); buttons.push({ mesh: m, key }); btnByKey[key] = m;
+      g.add(m);
+      const lab = new THREE.Mesh(labGeo,                                        // printed name on the face
+        new THREE.MeshBasicMaterial({ map: _cicdLabelTex(BTN_LABELS[i]), transparent: true }));
+      lab.position.set(BX, ROWS_Y[i], BZ + 0.0135);
+      lab.raycast = () => {};                                                   // don't block the button's aim
+      g.add(lab);
+      buttons.push({ mesh: m, key }); btnByKey[key] = m;
     });
-    // Dispensing tray at the bottom of the main branded panel (cans pop out here).
-    const tray = new THREE.Mesh(new THREE.BoxGeometry(0.42, 0.26, 0.09),
-      new THREE.MeshStandardMaterial({ color: 0x0c0d10, roughness: 0.9 }));
-    tray.position.set(-0.165, 0.36, 0.35); g.add(tray);
-    const TRAY = { x: -0.165, y: 0.40 };
+
+    // Self-contained LED price module: a dark backing plate + a raised bezel frame,
+    // with the 7-seg window recessed inside it — so the black display reads as a
+    // housed component rather than a bare rectangle stuck on the metal. Unlit (glows),
+    // flickered in animate like a working digital clock.
+    const dX = 0.365, dY = 1.838;   // centred between the silver-mech top and the coin-insert top
+    const bezelMat = new THREE.MeshStandardMaterial({ color: 0x2b2e34, roughness: 0.55, metalness: 0.35 });
+    const bz = (w, h, x, y) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.012), bezelMat); m.position.set(x, y, 0.3805); g.add(m); };
+    bz(0.206, 0.012, dX, dY + 0.036);         // thin raised bezel: top / bottom / left / right
+    bz(0.206, 0.012, dX, dY - 0.036);
+    bz(0.012, 0.084, dX - 0.097, dY);
+    bz(0.012, 0.084, dX + 0.097, dY);
+    const disp = new THREE.Mesh(new THREE.PlaneGeometry(0.18, 0.06),
+      new THREE.MeshBasicMaterial({ map: _makeSegTex("G1.00") }));   // leading ghost digit + right-aligned price
+    disp.position.set(dX, dY, 0.3785);        // LED just proud of the metal, inside the bezel
+    g.add(disp);
+    let dispT = 0;
+
+    // Can-delivery recess: a real pocket INTO the door. The panel is punched (alphaTest)
+    // so you see through to a dark cavity with a metal catch shelf and a hinged flap —
+    // the opening is flush and the interior recedes to the body front (like the sketch).
+    const RX = -0.165, RY = 0.30, RW = 0.34, RH = 0.24;
+    const RZO = 0.376, RZB = 0.342;                          // opening (panel) → back of the pocket (body)
+    const dep = RZO - RZB, midZ = (RZO + RZB) / 2;
+    const rDark = new THREE.MeshStandardMaterial({ color: 0x090a0c, roughness: 0.95 });
+    const rMetal = new THREE.MeshStandardMaterial({ color: 0x9aa0a8, roughness: 0.42, metalness: 0.85,
+      envMap: mats.screenEnv || null, envMapIntensity: 0.5 });
+    const back = new THREE.Mesh(new THREE.PlaneGeometry(RW, RH), rDark); back.position.set(RX, RY, RZB); g.add(back);
+    const wall = (geo, x, y) => { const m = new THREE.Mesh(geo, rDark); m.position.set(x, y, midZ); g.add(m); };
+    wall(new THREE.BoxGeometry(RW, 0.008, dep), RX, RY + RH / 2);          // top
+    wall(new THREE.BoxGeometry(0.008, RH, dep), RX - RW / 2, RY);          // left
+    wall(new THREE.BoxGeometry(0.008, RH, dep), RX + RW / 2, RY);          // right
+    const shelf = new THREE.Mesh(new THREE.BoxGeometry(RW, 0.012, dep), rMetal);   // metal catch shelf
+    shelf.position.set(RX, RY - RH / 2, midZ); g.add(shelf);
+    const frame = (w, h, x, y) => { const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, 0.018), rMetal); m.position.set(x, y, RZO + 0.004); g.add(m); };
+    frame(RW + 0.05, 0.026, RX, RY + RH / 2 + 0.013);                      // metal surround, flush on the panel
+    frame(RW + 0.05, 0.026, RX, RY - RH / 2 - 0.013);
+    frame(0.026, RH + 0.05, RX - RW / 2 - 0.013, RY);
+    frame(0.026, RH + 0.05, RX + RW / 2 + 0.013, RY);
+    // Smoky clear-plastic push-flap, HINGED AT THE TOP of the opening so a dispensed
+    // can shoves it outward on the way out, then it springs shut (driven in animate).
+    const flapPivot = new THREE.Group();
+    flapPivot.position.set(RX, RY + RH / 2 - 0.004, RZO);
+    g.add(flapPivot);
+    const flapH = RH * 0.9;
+    const flap = new THREE.Mesh(new THREE.BoxGeometry(RW - 0.02, flapH, 0.005),
+      new THREE.MeshPhysicalMaterial({ color: 0x202226, roughness: 0.13, metalness: 0,
+        transparent: true, opacity: 0.42, clearcoat: 1.0, clearcoatRoughness: 0.1,
+        envMap: mats.screenEnv || null, envMapIntensity: 0.6 }));
+    flap.position.set(0, -flapH / 2, 0); flapPivot.add(flap);
+    let flapAngle = 0; const FLAP_OPEN = -1.15;
+    const TRAY = { x: RX, y: RY };   // cans emerge from the chute
 
     const cx = g.position.x, cz = g.position.z;
     const walls = [{ minX: cx - 0.4, maxX: cx + 0.4, minZ: cz - 0.58, maxZ: cz + 0.58 }];
@@ -1289,12 +1507,13 @@ const office = {
       const lid = new THREE.Mesh(_lidGeo, _alu); lid.position.y = CAN_H / 2 + 0.025; grp.add(lid);
       const base = new THREE.Mesh(_baseGeo, _alu); base.position.y = -CAN_H / 2 - 0.007; grp.add(base);
       grp.userData.bodyMat = bodyMat;                                  // recoloured when the build ends
-      grp.rotation.set(Math.PI / 2, 0, Math.random() * Math.PI);       // lying down, random roll
       let can;
-      if (dispensed) {                                                 // pops from the tray with an arc
-        grp.position.set(TRAY.x, TRAY.y, 0.44);
-        can = { mesh: grp, vx: (Math.random() - 0.5) * 0.3, vy: 0.5, vz: 0.9 + Math.random() * 0.4, asleep: false };
+      if (dispensed) {                                                 // shoots out through the chute mouth
+        grp.rotation.set(0, 0, Math.PI / 2);                           // ON ITS SIDE — rolls out label-first
+        grp.position.set(TRAY.x, TRAY.y, RZO);
+        can = { mesh: grp, vx: (Math.random() - 0.5) * 0.2, vy: 0.2, vz: 0.8 + Math.random() * 0.3, asleep: false };
       } else {                                                         // seeded history — settled, non-overlapping
+        grp.rotation.set(Math.PI / 2, Math.random() * Math.PI, 0);     // lying flat, random direction
         const s = freeSpot();
         grp.position.set(s.x, CAN_R, s.z);
         can = { mesh: grp, vx: 0, vy: 0, vz: 0, asleep: true };
@@ -1379,6 +1598,22 @@ const office = {
             c.vx = c.vy = c.vz = 0; c.asleep = true;
           }
         }
+        // Push-flap: swing open while a can is passing out through the mouth, spring shut after.
+        let atFlap = false;
+        for (const c of cans) {
+          const p = c.mesh.position;
+          if (!c.asleep && c.vz > 0.03 && Math.abs(p.x - RX) < RW / 2 + 0.02 &&
+              Math.abs(p.y - RY) < RH / 2 + 0.06 && p.z > RZB && p.z < RZO + 0.13) { atFlap = true; break; }
+        }
+        flapAngle += ((atFlap ? FLAP_OPEN : 0) - flapAngle) * Math.min(1, dt * (atFlap ? 18 : 6));   // snap open, swing shut
+        flapPivot.rotation.x = flapAngle;
+
+        // 7-seg price LED flicker: a faint mains shimmer plus the occasional dip,
+        // like a digital clock working off an unsteady edge.
+        dispT += dt;
+        let lum = 1 - 0.05 * (0.5 + 0.5 * Math.sin(dispT * 34));
+        if (Math.random() < 0.02) lum *= 0.55;
+        disp.material.color.setScalar(lum);
       },
     };
   },

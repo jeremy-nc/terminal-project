@@ -131,6 +131,16 @@ function _blankRunState() {
     childrenByParent: {}, outputs: {}, result: null,
     // itr loop badge state: node_id -> { current, max, complete }
     iterById: {},
+    // ACP node/session state: id -> { entries } transcript, id -> pending
+    // permission prompt, id -> session controls { modes, models, commands }.
+    // (id is a node_id for pipeline, a session_id for collab.)
+    transcriptById: {}, permById: {}, acpMetaById: {},
+    // Collab runtime: { active, agent, sessions: [session_id...] }.
+    collab: { active: false, agent: null, sessions: [] },
+    // Live annotation selections over agent messages: user -> { sessionId, seq, start, end, live }.
+    annotations: {},
+    // Shared, co-edited agent-prompt draft per session: sessionId -> { text, cursors: {user: pos} }.
+    drafts: {},
     warnings: [], error: null, currentStage: null,
   };
 }
@@ -325,8 +335,8 @@ function _handleMsg(msg) {
       }
       const merged = defs.map((d) =>
         existing.has(d.id)
-          ? { ...existing.get(d.id), name: d.name, dir: d.dir, kind: d.kind, meta: d.meta, theme: d.theme || "tropical", closing: d.closing }
-          : { id: d.id, name: d.name, dir: d.dir, dsl: d.dsl || "", kind: d.kind || "directory", meta: d.meta || {}, theme: d.theme || "tropical", closing: d.closing, ..._blankRunState() }
+          ? { ...existing.get(d.id), name: d.name, dir: d.dir, kind: d.kind, meta: d.meta, theme: d.theme || "tropical", surface: d.surface || "pipeline", closing: d.closing }
+          : { id: d.id, name: d.name, dir: d.dir, dsl: d.dsl || "", kind: d.kind || "directory", meta: d.meta || {}, theme: d.theme || "tropical", surface: d.surface || "pipeline", closing: d.closing, ..._blankRunState() }
       );
       let active = msg.created || _state.activeWorkspaceId;
       if (!merged.find((w) => w.id === active)) {
@@ -561,10 +571,150 @@ function _handleMsg(msg) {
       break;
     }
     case "node_status": {
-      // Explicit status transition (e.g. a coordinator resuming after ask_user).
+      // Explicit status transition. Keyed by node_id (pipeline) or session_id (collab).
+      const wid = msg.workspace_id, id = msg.node_id ?? msg.session_id;
+      if (id == null || !wid) break;
+      _patchWorkspace(wid, (w) => ({ statusById: { ...w.statusById, [id]: msg.status } }));
+      break;
+    }
+    case "acp_update": {
+      // One transcript delta from an ACP node/session — upsert the entry by seq.
+      // Coalesced message/tool_call entries re-arrive with the same seq (replace).
+      const wid = msg.workspace_id, id = msg.node_id ?? msg.session_id;
+      if (id == null || !wid || !msg.entry) break;
+      _patchWorkspace(wid, (w) => {
+        const t = w.transcriptById?.[id] || { entries: [] };
+        const entries = t.entries.slice();
+        const i = entries.findIndex((e) => e.seq === msg.entry.seq);
+        if (i >= 0) entries[i] = msg.entry; else entries.push(msg.entry);
+        return { transcriptById: { ...(w.transcriptById || {}), [id]: { ...t, entries } } };
+      });
+      break;
+    }
+    case "acp_finished": {
+      // Authoritative final transcript — replace the incrementally-built one.
+      const wid = msg.workspace_id, id = msg.node_id ?? msg.session_id;
+      if (id == null || !wid) break;
+      _patchWorkspace(wid, (w) => ({
+        transcriptById: { ...(w.transcriptById || {}),
+          [id]: msg.transcript || w.transcriptById?.[id] },
+      }));
+      break;
+    }
+    case "acp_meta": {
+      // Session controls (modes/models/commands + current selection). Merge partials.
+      const wid = msg.workspace_id, id = msg.node_id ?? msg.session_id;
+      if (id == null || !wid) break;
+      _patchWorkspace(wid, (w) => {
+        const cur = w.acpMetaById?.[id] || {};
+        const next = { ...cur };
+        if (msg.modes) next.modes = msg.modes;
+        if (msg.models) next.models = msg.models;
+        if (msg.commands) next.commands = msg.commands;
+        if (msg.currentModeId && next.modes) next.modes = { ...next.modes, currentModeId: msg.currentModeId };
+        if (msg.currentModelId && next.models) next.models = { ...next.models, currentModelId: msg.currentModelId };
+        return { acpMetaById: { ...(w.acpMetaById || {}), [id]: next } };
+      });
+      break;
+    }
+    case "acp_permission": {
+      // The agent is asking to do something — surface an approval prompt, keyed by
+      // node_id (pipeline) or session_id (collab).
+      const wid = msg.workspace_id, id = msg.node_id ?? msg.session_id;
+      if (id == null || !wid) break;
+      _patchWorkspace(wid, (w) => ({
+        permById: { ...(w.permById || {}), [id]: {
+          requestId: msg.request_id, title: msg.title, tool: msg.tool,
+          content: msg.content, options: msg.options || [],
+        } },
+      }));
+      break;
+    }
+    case "collab_started": {
+      // A Collab workspace's runtime came up — record the chosen agent + mark active.
       const wid = msg.workspace_id;
-      if (msg.node_id == null || !wid) break;
-      _patchWorkspace(wid, (w) => ({ statusById: { ...w.statusById, [msg.node_id]: msg.status } }));
+      if (!wid) break;
+      _patchWorkspace(wid, (w) => ({ collab: { ...(w.collab || {}), active: true, agent: msg.agent, sessions: (w.collab?.sessions) || [] } }));
+      break;
+    }
+    case "collab_session_added":
+    case "collab_session_forked": {
+      // A new agent session/panel opened — append its id.
+      const wid = msg.workspace_id;
+      if (!wid || !msg.session_id) break;
+      _patchWorkspace(wid, (w) => {
+        const sessions = (w.collab?.sessions) || [];
+        return sessions.includes(msg.session_id) ? {}
+          : { collab: { ...(w.collab || { active: true, sessions: [] }), sessions: [...sessions, msg.session_id] } };
+      });
+      break;
+    }
+    case "collab_session_removed": {
+      const wid = msg.workspace_id;
+      if (!wid || !msg.session_id) break;
+      _patchWorkspace(wid, (w) => ({
+        collab: { ...(w.collab || {}), sessions: (w.collab?.sessions || []).filter((s) => s !== msg.session_id) },
+      }));
+      break;
+    }
+    case "collab_stopped": {
+      const wid = msg.workspace_id;
+      if (!wid) break;
+      _patchWorkspace(wid, () => ({ collab: { active: false, agent: null, sessions: [] } }));
+      break;
+    }
+    case "collab_error": {
+      _pushToast(msg.message || "collab error");
+      break;
+    }
+    case "annotation_selection": {
+      // A user's live/final annotation over an agent message. Empty span clears it.
+      const wid = msg.workspace_id, user = msg.user;
+      if (!wid || !user) break;
+      _patchWorkspace(wid, (w) => {
+        const anns = { ...(w.annotations || {}) };
+        if (msg.start == null || msg.start === msg.end) delete anns[user];
+        else anns[user] = { sessionId: msg.session_id, seq: msg.seq, start: msg.start, end: msg.end, live: !!msg.live };
+        return { annotations: anns };
+      });
+      break;
+    }
+    case "prompt_draft": {
+      // A shared-draft edit: set the session's text (last-writer-wins) + this
+      // user's caret position.
+      const wid = msg.workspace_id, user = msg.user, sid = msg.session_id;
+      if (!wid || !user || !sid) break;
+      _patchWorkspace(wid, (w) => {
+        const drafts = { ...(w.drafts || {}) };
+        const d = { ...(drafts[sid] || { text: "", cursors: {} }) };
+        d.text = msg.text || "";
+        d.cursors = { ...d.cursors, [user]: msg.cursor || 0 };
+        drafts[sid] = d;
+        return { drafts };
+      });
+      break;
+    }
+    case "annotation_clear": {
+      // A user disconnected — drop their annotations, and their caret from every
+      // shared draft (the shared text itself persists).
+      const user = msg.user;
+      if (!user) break;
+      _setState({ workspaces: _state.workspaces.map((w) => {
+        const hasAnn = w.annotations && user in w.annotations;
+        let drafts = w.drafts, draftChanged = false;
+        for (const sid in (w.drafts || {})) {
+          if (w.drafts[sid].cursors && user in w.drafts[sid].cursors) {
+            if (!draftChanged) drafts = { ...w.drafts };
+            const cursors = { ...drafts[sid].cursors }; delete cursors[user];
+            drafts[sid] = { ...drafts[sid], cursors }; draftChanged = true;
+          }
+        }
+        if (!hasAnn && !draftChanged) return w;
+        const next = { ...w };
+        if (hasAnn) { const a = { ...w.annotations }; delete a[user]; next.annotations = a; }
+        if (draftChanged) next.drafts = drafts;
+        return next;
+      }) });
       break;
     }
     case "node_attached": {
@@ -879,8 +1029,8 @@ export function rerunTeamCityBuild(buildId) { _send({ type: "teamcity_rerun", bu
 // ── workspace actions ────────────────────────────────────────────────────────
 /** Create a workspace of `kind` (e.g. "directory" | "worktree") from the modal's
  *  field values. The backend's kind adapter provisions the working dir. */
-export function createWorkspace(kind, fields) {
-  _send({ type: "create_workspace", kind, fields });
+export function createWorkspace(kind, fields, surface = "pipeline") {
+  _send({ type: "create_workspace", kind, fields, surface });
 }
 
 export function deleteWorkspace(wid, opts = {}) {
@@ -1053,9 +1203,110 @@ export function cancelWorkspace(wid) {
   _send({ type: "cancel_workspace", workspace_id: wid });
 }
 
-/** Steer a running coordinator agent — routed to its inbox by (workspace, node). */
+/** Steer a running coordinator/ACP agent — routed to its inbox by (workspace, node).
+ *  For a conversational ACP node this is the user's follow-up prompt (next turn). */
 export function sendNodeInput(workspaceId, nodeId, text) {
   _send({ type: "node_input", workspace_id: workspaceId, node_id: nodeId, text });
+}
+
+/** End a conversational ACP node's session — finalizes it (and moves a pipeline on). */
+export function finishAcpNode(workspaceId, nodeId) {
+  _send({ type: "acp_finish", workspace_id: workspaceId, node_id: nodeId });
+}
+
+// ── Collab workspace ──────────────────────────────────────────────────────────
+/** Activate a Collab workspace's runtime with the chosen agent (spawns the client). */
+export function runCollab(workspaceId, agent) {
+  _send({ type: "run_collab", workspace_id: workspaceId, agent });
+}
+/** Open a new agent session/panel on the workspace's runtime. */
+export function collabAddSession(workspaceId, kickoff) {
+  _send({ type: "collab_add_session", workspace_id: workspaceId, kickoff });
+}
+/** Snapshot-fork a session: a new panel seeded with the source's context + seed. */
+export function collabForkSession(workspaceId, fromSessionId, seedPrompt) {
+  _send({ type: "collab_fork_session", workspace_id: workspaceId,
+          from_session_id: fromSessionId, seed_prompt: seedPrompt });
+}
+/** Send-to-agent: a prompt turn on one session. */
+export function collabPrompt(workspaceId, sessionId, text) {
+  _send({ type: "collab_prompt", workspace_id: workspaceId, session_id: sessionId, text });
+}
+/** Broadcast-only chat message on one session (not sent to the agent). */
+export function collabChat(workspaceId, sessionId, text) {
+  _send({ type: "collab_chat", workspace_id: workspaceId, session_id: sessionId, text });
+}
+/** Interrupt one session's current agent turn. */
+export function collabCancel(workspaceId, sessionId) {
+  _send({ type: "collab_cancel", workspace_id: workspaceId, session_id: sessionId });
+}
+/** Close one agent session/panel. */
+export function collabRemoveSession(workspaceId, sessionId) {
+  _send({ type: "collab_remove_session", workspace_id: workspaceId, session_id: sessionId });
+}
+/** Stop the whole Collab runtime (keeps the workspace so it can be Run again). */
+export function stopCollab(workspaceId) {
+  _send({ type: "stop_collab", workspace_id: workspaceId });
+}
+
+/** Broadcast this window's annotation selection over an agent message (char offsets
+ *  relative to the message). An empty span (start === end) clears it. */
+export function sendAnnotationSelect(workspaceId, sessionId, seq, start, end, live) {
+  _send({ type: "annotation_select", workspace_id: workspaceId, session_id: sessionId,
+          seq, start, end, live: !!live });
+}
+
+/** Broadcast an edit to a session's shared agent-prompt draft (full text + caret). */
+export function sendPromptTyping(workspaceId, sessionId, text, cursor) {
+  _send({ type: "prompt_typing", workspace_id: workspaceId, session_id: sessionId,
+          text, cursor: cursor || 0 });
+}
+
+/** Optimistically apply this window's own edit to the shared draft (instant local
+ *  echo; the broadcast round-trip then keeps everyone in sync). */
+export function updateDraftLocal(workspaceId, sessionId, text, cursor, user) {
+  _patchWorkspace(workspaceId, (w) => {
+    const drafts = { ...(w.drafts || {}) };
+    const d = { ...(drafts[sessionId] || { text: "", cursors: {} }) };
+    d.text = text;
+    if (user) d.cursors = { ...d.cursors, [user]: cursor };
+    drafts[sessionId] = d;
+    return { drafts };
+  });
+}
+
+/** Switch a running ACP node's permission mode (ask / accept-edits / plan / …). */
+export function setAcpMode(workspaceId, nodeId, modeId) {
+  if (!modeId) return;  // never send an empty selection
+  _patchWorkspace(workspaceId, (w) => {
+    const m = w.acpMetaById?.[nodeId];
+    if (!m?.modes) return {};
+    return { acpMetaById: { ...w.acpMetaById, [nodeId]: { ...m, modes: { ...m.modes, currentModeId: modeId } } } };
+  });
+  _send({ type: "acp_set_mode", workspace_id: workspaceId, node_id: nodeId, mode_id: modeId });
+}
+
+/** Switch a running ACP node's model (default / sonnet / haiku / …). */
+export function setAcpModel(workspaceId, nodeId, modelId) {
+  if (!modelId) return;  // never send an empty selection
+  _patchWorkspace(workspaceId, (w) => {
+    const m = w.acpMetaById?.[nodeId];
+    if (!m?.models) return {};
+    return { acpMetaById: { ...w.acpMetaById, [nodeId]: { ...m, models: { ...m.models, currentModelId: modelId } } } };
+  });
+  _send({ type: "acp_set_model", workspace_id: workspaceId, node_id: nodeId, model_id: modelId });
+}
+
+/** Answer an ACP node's permission prompt: clear it locally and tell the server
+ *  which option was chosen (resolves the node's awaiting request). */
+export function replyAcpPermission(workspaceId, nodeId, requestId, optionId) {
+  _patchWorkspace(workspaceId, (w) => {
+    const next = { ...(w.permById || {}) };
+    delete next[nodeId];
+    return { permById: next };
+  });
+  _send({ type: "acp_permission_reply", workspace_id: workspaceId,
+          node_id: nodeId, request_id: requestId, option_id: optionId });
 }
 
 /** Launch a session in the real macOS Terminal. The server's active backend

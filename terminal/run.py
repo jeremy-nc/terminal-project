@@ -40,6 +40,23 @@ class PipelineRun:
         self.event_log = []
         # The asyncio.Task executing this run (set by the caller after create).
         self.task = None
+        # AcpPool for this run's ACP nodes — lazily created by the first AcpNode,
+        # holds the agent subprocesses. Closed (child processes killed) when the
+        # run ends or is cancelled. Duck-typed so run.py stays decoupled from it.
+        self.acp = None
+        # Pending ACP permission prompts: "<node_id>:<request_id>" -> Future, so
+        # an `acp_permission_reply` from any window resolves the awaiting node.
+        self.acp_perms = {}
+        # Live ACP sessions: node_id -> (AcpClient, session_id), so the server can
+        # route set_mode/set_model to the right client+session while it runs.
+        self.acp_sessions = {}
+
+    async def close_acp(self) -> None:
+        """Kill any ACP agent subprocesses this run spawned. Safe to call when no
+        ACP nodes ran (self.acp is None)."""
+        if self.acp is not None:
+            await self.acp.close()
+            self.acp = None
 
     def send(self, event: dict) -> None:
         """Stamp the event with this run's workspace_id, record it for late-join

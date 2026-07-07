@@ -62,6 +62,33 @@ export function parseDsl(text) {
       continue;
     }
 
+    // acp: <prompt>              -> ACP coding-agent node; the text after `acp:`
+    //   IS the prompt (no `prompt:` directive needed). Lead with a known agent
+    //   name to pick it: `acp: claude-code "fix the bug"`. Optional indented
+    //   directives modify it:
+    //     acp: refactor {{input}}
+    //       agent: claude-code
+    //       permission: ask
+    //       mcps: github, jira
+    //   With no inline text, the block form's `prompt:` / `prompt: |` still works.
+    if (line.startsWith("acp:")) {
+      const inline = line.slice(4).trim();
+      const { block, next } = _parseAgentBlock(rawLines, i);  // consume indented directives (if any)
+      i = next;
+      const lead = inline ? _parseAcpLead(inline) : {};
+      nodes.push({
+        id: nextId(),
+        type: "acp",
+        agent: block.agent || lead.agent || "stub",
+        // inline prompt wins; else a block `prompt:`; else the upstream output.
+        prompt: lead.prompt != null ? lead.prompt
+              : (block.prompt != null ? block.prompt : "{{input}}"),
+        permission: block.permission || "auto",
+        mcps: block.mcps ? block.mcps.split(",").map(s => s.trim()).filter(Boolean) : [],
+      });
+      continue;
+    }
+
     // itr(N): <indented block>  -> IterationNode. Loops the body (seq/batch/…
     //   lines) feeding each pass's output back as the next pass's input, until a
     //   hidden judge says complete or N passes run (default 5). An `until:` line
@@ -118,6 +145,17 @@ function _parseAgentInline(inline, id) {
     prompt = tokens.join(" ");
   }
   return { id, type: "agent", backend, model, prompt, system: null, mcps: [], delegate: true };
+}
+
+/** Parse the text after `acp:`: an optional leading known-agent name, then the
+ *  prompt (the rest). `claude-code "fix it"` -> {agent, prompt}; `fix it` -> {prompt}. */
+function _parseAcpLead(inline) {
+  const KNOWN_AGENTS = ["stub", "claude-code", "gemini", "hermes"];
+  const tokens = _tokenize(inline);
+  if (tokens.length && KNOWN_AGENTS.includes(tokens[0])) {
+    return { agent: tokens[0], prompt: tokens.slice(1).join(" ") };
+  }
+  return { prompt: tokens.join(" ") };
 }
 
 /**

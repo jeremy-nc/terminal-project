@@ -5,6 +5,7 @@ import re
 from typing import Any, List, Optional, Callable
 from .manager import SessionManager
 from .session import Subscriber
+from agents.acp import AcpPool, Transcript, AcpSession
 
 # Matches ANSI/VT escape sequences so PTY output can be cleaned before it is
 # piped into a downstream node as {{input}} or rendered as a final result.
@@ -1018,6 +1019,166 @@ class CoordinatorAgentNode(Node):
         return result
 
 
+class AcpNode(Node):
+    """A coding-agent node driven over ACP (Agent Client Protocol). It spawns (or
+    reuses) an ACP agent subprocess from the run's :class:`AcpPool`, opens a
+    session, sends the prompt, and folds the agent's ``session/update`` stream
+    into a :class:`Transcript`.
+
+    Phase 1 renders that transcript as text in a virtual-session terminal card
+    (reusing the coordinator's card machinery) and auto-approves permission
+    requests; the structured card + approval UI arrive in Phase 2. The agent
+    reaches the filesystem only by calling ``fs/*`` back on us, confined to this
+    node's cwd — it has no direct access.
+    """
+
+    def __init__(
+        self,
+        manager: SessionManager,
+        agent: str,
+        prompt: str,
+        cols: int = 80,
+        rows: int = 24,
+        event_bus: Subscriber = None,
+        node_id: Any = None,
+        cwd: str = None,
+        outputs: dict = None,
+        mcps: list = None,
+        permission: str = "auto",
+        parent_id: Any = None,
+    ):
+        self.manager = manager
+        self.agent = agent or "stub"
+        self.prompt = prompt if prompt is not None else "{{input}}"
+        self.cols = cols
+        self.rows = rows
+        self.event_bus = event_bus
+        self.node_id = node_id
+        self.cwd = cwd
+        self.outputs = outputs
+        self.mcps = mcps or []
+        self.permission = permission or "auto"
+        self.parent_id = parent_id
+
+    def _narrate(self, vsess, text: str) -> None:
+        self.manager.feed(vsess, text.replace("\n", "\r\n").encode())
+
+    def _pool(self) -> AcpPool:
+        """Get-or-create the run's AcpPool (holds the agent subprocesses) so every
+        ACP node in a run shares warm agents and one teardown kills them all."""
+        pool = getattr(self.event_bus, "acp", None)
+        if pool is None:
+            pool = AcpPool()
+            try:
+                self.event_bus.acp = pool
+            except Exception:
+                pass
+        return pool
+
+    def _register_inbox(self, inbox) -> Optional[dict]:
+        """Register this node's input queue on the run (keyed by node_id) so the
+        server routes `node_input` (a conversational reply) / `acp_finish` to it."""
+        if self.event_bus is None or self.node_id is None:
+            return None
+        registry = getattr(self.event_bus, "agent_inboxes", None)
+        if registry is None:
+            registry = {}
+            try:
+                self.event_bus.agent_inboxes = registry
+            except Exception:
+                return None
+        registry[self.node_id] = inbox
+        return registry
+
+    async def run(self, input_data: Any) -> Any:
+        vsess = self.manager.create_virtual(self.cols, self.rows)
+        if self.event_bus:
+            self.event_bus.send({
+                "type": "node_started", "node_type": "terminal",
+                "id": vsess.id, "node_id": self.node_id, "parent_id": self.parent_id,
+                "internal": False, "argv": ["acp", self.agent],
+            })
+
+        prompt = (_apply_template(self.prompt, {"input": render_input(input_data)})
+                  if self.prompt else render_input(input_data))
+        self._narrate(vsess, f"acp · {self.agent}\n")
+
+        inbox = asyncio.Queue()
+        inbox_registry = self._register_inbox(inbox)
+        session = None
+        stop_reason = None
+        failed = False
+        try:
+            client = await self._pool().get(self.agent, self.cwd)
+            session = AcpSession(
+                client, self.cwd, key=self.node_id, key_field="node_id",
+                emit=(self.event_bus.send if self.event_bus else None),
+                perms=getattr(self.event_bus, "acp_perms", None),
+                permission=self.permission, agent=self.agent,
+                on_narrate=lambda text: self._narrate(vsess, text))
+            await session.open(mcps=[])
+            # Register the session so the server routes set_mode/set_model to it.
+            sessions = getattr(self.event_bus, "acp_sessions", None)
+            if sessions is not None:
+                sessions[self.node_id] = (client, session.session_id)
+            # Conversational loop: ACP has no "awaiting input" signal — every turn
+            # ends `end_turn` and hands control back — so after each turn we surface
+            # a reply box and continue on the SAME session until the user finishes
+            # (inbox receives None) or the agent stops abnormally.
+            while True:
+                session.record_user(prompt)
+                stop_reason = await session.prompt(prompt)
+                if stop_reason not in (None, "end_turn"):
+                    break  # refusal / cancelled / limit — end the conversation
+                if self.event_bus:
+                    self.event_bus.send({
+                        "type": "needs_input", "id": vsess.id, "node_id": self.node_id,
+                        "parent_id": self.parent_id, "last_output": b"",
+                    })
+                reply = await inbox.get()
+                if self.event_bus:
+                    self.event_bus.send({
+                        "type": "node_status", "node_id": self.node_id, "status": "running"})
+                if reply is None:  # user pressed Finish
+                    break
+                prompt = reply
+        except Exception as exc:  # noqa: BLE001 — surface agent/spawn failures in the card
+            failed = True
+            if session is not None:
+                session.record_error(str(exc))
+            else:
+                self._narrate(vsess, f"\n[acp error] {exc}\n")
+        finally:
+            if inbox_registry is not None:
+                inbox_registry.pop(self.node_id, None)
+            sessions = getattr(self.event_bus, "acp_sessions", None)
+            if sessions is not None:
+                sessions.pop(self.node_id, None)
+            if session is not None:
+                await session.close()
+            self.manager.finish_virtual(vsess)
+
+        transcript = session.transcript if session is not None \
+            else Transcript(self.node_id, None, self.agent, self.cwd)
+        transcript.finalize(stop_reason)
+        text = transcript.assistant_text()
+        exit_code = 0 if (not failed and stop_reason in (None, "end_turn")) else 1
+        result = {"output": text.encode(), "exit_code": exit_code, "transcript": transcript.to_json()}
+        if self.outputs is not None and self.node_id is not None:
+            self.outputs[self.node_id] = result
+        if self.event_bus:
+            self.event_bus.send({
+                "type": "node_finished", "id": vsess.id, "node_id": self.node_id,
+                "parent_id": self.parent_id, "exit_code": exit_code, "output": text.encode(),
+            })
+            # Authoritative final transcript (also a snapshot for late-join replay).
+            self.event_bus.send({
+                "type": "acp_finished", "node_id": self.node_id,
+                "stop_reason": stop_reason, "transcript": transcript.to_json(),
+            })
+        return result
+
+
 class PipelineEngine:
     """Entry point for running a composed pipeline and watching its progress."""
 
@@ -1155,6 +1316,24 @@ def build_node_tree(
             node_id=spec.get("id"),
             cwd=resolved,
             outputs=outputs,
+        )
+    elif ntype == "acp":
+        raw_cwd = spec.get("cwd")
+        resolved = _resolve_cwd(raw_cwd, _global_cwd) if raw_cwd else _global_cwd
+        # A coding-agent node driven over ACP: spawns/reuses an agent subprocess
+        # (from the run's AcpPool) and streams its session/update transcript.
+        return AcpNode(
+            manager=manager,
+            agent=spec.get("agent", "stub"),
+            prompt=spec.get("prompt", "{{input}}"),
+            cols=spec.get("cols", 80),
+            rows=spec.get("rows", 24),
+            event_bus=event_bus,
+            node_id=spec.get("id"),
+            cwd=resolved,
+            outputs=outputs,
+            mcps=spec.get("mcps", []),
+            permission=spec.get("permission", "auto"),
         )
     elif ntype == "batch":
         nodes = [build_node_tree(n, manager, event_bus, _global_cwd, outputs, loop_vars) for n in spec["nodes"]]

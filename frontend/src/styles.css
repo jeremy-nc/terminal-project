@@ -316,12 +316,99 @@ html, body { background: var(--bg); }
 }
 /* Same idea for the pipeline view — kept mounted so its node terminals survive
    the switch. Fills the stage so the inner .pipeline-screen (flex:1) lays out. */
-.pipeline-view-wrap {
+.pipeline-view-wrap,
+.collab-view-wrap {
   flex: 1;
   min-width: 0;
   min-height: 0;
   flex-direction: column; /* workspace tab bar on top, dashboard fills below */
 }
+
+/* ── Collab dashboard (ACP-agent chat surface) ───────────── */
+.collab-dash { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.collab-body { flex: 1; min-height: 0; display: flex; }
+
+.collab-sidebar { width: 200px; flex: none; border-right: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; }
+.collab-side-head { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
+.collab-title { font-size: 13px; font-weight: 600; color: var(--text); }
+.collab-dir { font-size: 11px; color: var(--text-faint); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.collab-side-actions { margin-top: auto; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.collab-agent-label { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+.collab-agent-active { font-size: 12px; color: var(--text-muted); }
+.collab-run, .collab-add {
+  font-size: 13px; padding: 8px 12px; border-radius: var(--radius-sm); cursor: pointer;
+  border: 1px solid transparent; background: var(--accent); color: #fff;
+}
+.collab-run:hover, .collab-add:hover { background: var(--accent-hover); }
+
+.collab-panels { flex: 1; min-width: 0; display: flex; gap: 12px; padding: 12px; overflow-x: auto; }
+.collab-panels .ws-empty { flex: 1; }
+
+.collab-panel {
+  width: 380px; flex: none; display: flex; flex-direction: column;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden;
+}
+.collab-panel-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.collab-panel-title { font-size: 12px; font-weight: 600; color: var(--text); }
+.collab-panel-sid { font-size: 11px; color: var(--text-faint); font-family: var(--mono); }
+.collab-fork { margin-left: auto; font-size: 11px; padding: 3px 8px; border-radius: 4px; border: 1px solid var(--border-strong); background: var(--surface-hover); color: var(--text-muted); cursor: pointer; }
+.collab-fork:hover { color: var(--text); background: var(--surface); }
+.collab-panel-btn { font-size: 12px; width: 24px; padding: 3px 0; border-radius: 4px; border: 1px solid var(--border-strong); background: var(--surface-hover); color: var(--text-muted); cursor: pointer; }
+.collab-panel-btn:hover { color: var(--text); background: var(--surface); }
+.collab-panel-btn.close:hover { color: var(--danger); }
+.collab-stop { font-size: 13px; padding: 8px 12px; border-radius: var(--radius-sm); cursor: pointer; border: 1px solid var(--border-strong); background: var(--surface-hover); color: var(--text-muted); }
+.collab-stop:hover { color: var(--danger); background: var(--surface); }
+
+.collab-feed { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 12px; overflow-y: auto; }
+.collab-feed > * { flex-shrink: 0; }
+.collab-msg { user-select: text; }
+
+/* Live annotation selections (other users' highlights) — translucent overlay
+   rectangles so overlapping highlights blend; coloured per user. */
+.collab-annlayer { position: absolute; top: 0; left: 0; width: 100%; pointer-events: none; z-index: 1; }
+.collab-ann { position: absolute; border-radius: 2px; opacity: 0.26; border-bottom: 2px solid; }
+.collab-ann.live { opacity: 0.4; }
+
+.collab-bubble { max-width: 82%; padding: 7px 10px; border-radius: 10px; font-size: 13px; word-break: break-word; }
+.collab-bubble.left { align-self: flex-start; background: var(--accent-soft); color: var(--text); }
+.collab-bubble.right { align-self: flex-end; background: var(--surface-2); border: 1px solid var(--border); color: var(--text); }
+.collab-bubble.right.agent { max-width: 92%; }
+.collab-bubble.prompt { font-style: italic; }
+.collab-sender { font-size: 10px; color: var(--text-faint); margin-bottom: 2px; }
+.collab-bubble-text { white-space: pre-wrap; }
+.collab-msg :first-child { margin-top: 0; } .collab-msg :last-child { margin-bottom: 0; }
+.collab-msg h1, .collab-msg h2, .collab-msg h3 { font-size: 14px; margin: 10px 0 5px; }
+.collab-msg code { font-family: var(--mono); font-size: 12px; background: var(--bg); padding: 1px 4px; border-radius: 4px; }
+.collab-msg pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px; overflow-x: auto; }
+.collab-msg table { border-collapse: collapse; font-size: 12px; display: block; overflow-x: auto; }
+.collab-msg th, .collab-msg td { border: 1px solid var(--border); padding: 3px 7px; }
+.collab-thought { align-self: flex-end; max-width: 82%; font-size: 11.5px; font-style: italic; color: var(--text-faint); white-space: pre-wrap; max-height: 90px; overflow-y: auto; }
+.collab-bubble.tool { font-size: 12px; }
+.collab-tool-head { display: flex; gap: 7px; align-items: baseline; }
+.collab-tool-dot { align-self: center; width: 6px; height: 6px; border-radius: 50%; background: var(--text-faint); flex: none; }
+.collab-bubble.tool.status-pending .collab-tool-dot, .collab-bubble.tool.status-in_progress .collab-tool-dot { background: var(--warn); animation: acp-blink 1.2s infinite ease-in-out; }
+.collab-bubble.tool.status-completed .collab-tool-dot { background: var(--success); }
+.collab-bubble.tool.status-failed .collab-tool-dot { background: var(--danger); }
+.collab-tool-verb { font-weight: 600; color: var(--text); white-space: nowrap; }
+.collab-tool-title { font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.collab-tool-out { margin: 6px 0 0; font-family: var(--mono); font-size: 11px; white-space: pre-wrap; color: var(--text-faint); max-height: 120px; overflow-y: auto; }
+
+.collab-inputs { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+/* Shared, co-edited prompt textarea with other users' live carets (ID chips). */
+.collab-textwrap { position: relative; flex: 1; display: flex; }
+textarea.collab-input.agent { flex: 1; resize: vertical; min-height: 54px; line-height: 1.4; font-family: var(--sans); }
+.collab-cursors { position: absolute; inset: 0; pointer-events: none; }
+.collab-cursor { position: absolute; }
+.collab-cursor-bar { position: absolute; top: 0; width: 2px; height: 1.3em; border-radius: 1px; }
+.collab-cursor-id { position: absolute; top: -11px; left: 0; font-size: 9px; font-weight: 600; color: #fff; padding: 0 4px; border-radius: 3px; white-space: nowrap; }
+.collab-input-row { display: flex; gap: 6px; }
+.collab-input { flex: 1; font-size: 13px; background: var(--surface-2); color: var(--text); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 6px 9px; }
+.collab-input.agent { border-color: color-mix(in srgb, var(--accent) 40%, var(--border-strong)); }
+.collab-input:focus { outline: none; border-color: var(--accent); }
+.collab-send { font-size: 12px; padding: 6px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-strong); background: var(--surface-hover); color: var(--text); cursor: pointer; }
+.collab-send.agent { border-color: transparent; background: var(--accent); color: #fff; }
+.collab-send.agent:hover { background: var(--accent-hover); }
+.collab-send:disabled { opacity: 0.4; cursor: default; }
 
 /* ── workspace ("session") tabs ─────────────────────────── */
 .ws-tabs {
@@ -1989,3 +2076,173 @@ html, body { background: var(--bg); }
 
 .slack-watch.mux { color: var(--success, #4ec9b0); opacity: 0.45; }
 .slack-watch.mux:hover { opacity: 0.9; }
+
+/* ── ACP node card ──────────────────────────────────────────────────────────
+   Rich transcript view for an ACP coding-agent node: thoughts, assistant
+   markdown, tool calls (IN/OUT), diffs, and an inline permission prompt. */
+.acp-card {
+  display: flex; flex-direction: column;
+  min-width: 380px; max-width: 640px;
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); overflow: hidden;
+}
+.acp-card.status-running { border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.acp-card.status-finished { border-color: color-mix(in srgb, var(--success) 34%, var(--border)); }
+.acp-card.status-error { border-color: color-mix(in srgb, var(--danger) 40%, var(--border)); }
+.acp-card.pulse { animation: acp-pulse 1.4s var(--ease) infinite; }
+@keyframes acp-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--warn) 30%, transparent); }
+  50% { box-shadow: 0 0 0 3px color-mix(in srgb, var(--warn) 16%, transparent); }
+}
+
+.acp-card-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 10px; border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.acp-agent { font-size: 12px; color: var(--text-muted); font-family: var(--mono); }
+.acp-status-text { margin-left: auto; font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
+
+.acp-badge {
+  font-size: 10px; font-weight: 600; letter-spacing: 0.04em;
+  padding: 2px 6px; border-radius: 4px;
+  background: var(--surface-hover); color: var(--text-muted);
+  border: 1px solid var(--border); text-transform: uppercase;
+}
+.acp-badge.agent { background: var(--accent-soft); color: var(--accent-hover); border-color: transparent; }
+
+.acp-feed { display: flex; flex-direction: column; gap: 10px; padding: 12px; overflow-y: auto; max-height: 460px; }
+/* The feed is a height-capped flex column: without this its children shrink below
+   their natural height (and `.acp-tool` clips with overflow:hidden), so blocks
+   overlap instead of the feed scrolling. Pin their size and let the feed scroll. */
+.acp-feed > * { flex-shrink: 0; }
+
+.acp-thought {
+  font-size: 12px; color: var(--text-faint); font-style: italic;
+  padding-left: 14px; border-left: 2px solid var(--border);
+  white-space: pre-wrap; word-break: break-word;
+  max-height: 120px; overflow-y: auto;
+}
+
+/* Agent/transport failure (e.g. "Credit balance is too low") — shown on the card. */
+.acp-error {
+  font-size: 12.5px; color: var(--danger); white-space: pre-wrap; word-break: break-word;
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border));
+  border-radius: var(--radius-sm); padding: 8px 10px;
+}
+
+/* Live "the agent is working" indicator, shown while a turn is running. Distinct
+   from `agent_thought_chunk` content (which renders as .acp-thought when an agent
+   emits it) — this is a state cue every agent gives us. */
+.acp-working { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted); font-style: italic; padding: 2px 0; }
+.acp-dots { display: inline-flex; gap: 3px; }
+.acp-dots i { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); animation: acp-blink 1.2s infinite ease-in-out; }
+.acp-dots i:nth-child(2) { animation-delay: 0.2s; }
+.acp-dots i:nth-child(3) { animation-delay: 0.4s; }
+@keyframes acp-blink { 0%, 80%, 100% { opacity: 0.25; } 40% { opacity: 1; } }
+
+/* User prompts (kickoff + conversational follow-ups) — a distinct aligned bubble. */
+.acp-user {
+  align-self: flex-end; max-width: 85%;
+  font-size: 13px; color: var(--text); white-space: pre-wrap; word-break: break-word;
+  background: var(--accent-soft); border: 1px solid transparent;
+  border-radius: var(--radius-sm); padding: 7px 10px;
+}
+
+/* Footer: session controls (mode/model) + the reply box, pinned below the feed. */
+.acp-footer { border-top: 1px solid var(--border); padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
+.acp-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.acp-select {
+  font-size: 11.5px; font-family: var(--sans); color: var(--text-muted);
+  background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm);
+  padding: 4px 8px; cursor: pointer;
+}
+.acp-select:hover { border-color: var(--border-strong); }
+.acp-select:focus { outline: none; border-color: var(--accent); }
+
+.acp-reply-wrap { position: relative; }
+.acp-cmd-menu {
+  position: absolute; bottom: calc(100% + 6px); left: 0; right: 0;
+  max-height: 240px; overflow-y: auto; z-index: 20;
+  background: var(--surface); border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm); box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+}
+.acp-cmd-item { display: flex; gap: 10px; align-items: baseline; padding: 6px 10px; cursor: pointer; }
+.acp-cmd-item:hover { background: var(--surface-hover); }
+.acp-cmd-name { font-family: var(--mono); font-size: 12px; color: var(--accent-hover); flex: none; }
+.acp-cmd-desc { font-size: 11.5px; color: var(--text-faint); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.acp-slash {
+  flex: none; width: 30px; font-family: var(--mono); font-size: 14px; font-weight: 600;
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface-hover); color: var(--text-muted); cursor: pointer;
+}
+.acp-slash:hover { color: var(--text); background: var(--surface); }
+
+/* Reply box shown after each turn (Option A: every ACP node is conversational). */
+.acp-reply { display: flex; gap: 8px; align-items: center; }
+.acp-reply-input {
+  flex: 1; font-size: 13px; font-family: var(--sans);
+  background: var(--surface-2); color: var(--text);
+  border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 7px 10px;
+}
+.acp-reply-input:focus { outline: none; border-color: var(--accent); }
+.acp-reply-send, .acp-reply-finish {
+  font-size: 12px; padding: 7px 12px; border-radius: var(--radius-sm); cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--surface-hover); color: var(--text);
+  transition: background var(--dur) var(--ease);
+}
+.acp-reply-send { border-color: transparent; background: var(--accent); color: #fff; }
+.acp-reply-send:hover { background: var(--accent-hover); }
+.acp-reply-send:disabled { opacity: 0.4; cursor: default; }
+.acp-reply-finish { color: var(--text-muted); }
+.acp-reply-finish:hover { background: var(--surface); }
+
+.acp-msg { font-size: 13px; color: var(--text); line-height: 1.5; }
+.acp-msg :first-child { margin-top: 0; }
+.acp-msg :last-child { margin-bottom: 0; }
+.acp-msg h1, .acp-msg h2, .acp-msg h3 { font-size: 14px; margin: 12px 0 6px; color: var(--text); }
+.acp-msg p { margin: 6px 0; }
+.acp-msg code { font-family: var(--mono); font-size: 12px; background: var(--surface-2); padding: 1px 4px; border-radius: 4px; }
+.acp-msg pre { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 8px; overflow-x: auto; }
+.acp-msg pre code { background: none; padding: 0; }
+.acp-msg table { border-collapse: collapse; font-size: 12px; margin: 6px 0; display: block; overflow-x: auto; }
+.acp-msg th, .acp-msg td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+.acp-msg th { background: var(--surface-2); font-weight: 600; }
+.acp-msg a { color: var(--accent-hover); }
+
+.acp-tool { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: var(--surface-2); }
+.acp-tool-head { display: flex; align-items: center; gap: 8px; padding: 6px 8px; }
+.acp-tool-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); flex: none; }
+.acp-tool.status-pending .acp-tool-dot, .acp-tool.status-in_progress .acp-tool-dot { background: var(--warn); }
+.acp-tool.status-completed .acp-tool-dot { background: var(--success); }
+.acp-tool.status-failed .acp-tool-dot { background: var(--danger); }
+.acp-tool-title { font-size: 12px; color: var(--text); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acp-tool-row { display: flex; gap: 8px; padding: 4px 8px 6px; border-top: 1px solid var(--border); }
+.acp-gutter { font-size: 10px; color: var(--text-faint); font-weight: 600; width: 26px; flex: none; padding-top: 2px; }
+.acp-tool-row pre { flex: 1; margin: 0; font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); white-space: pre-wrap; word-break: break-word; max-height: 160px; overflow-y: auto; }
+
+.acp-diff { border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; }
+.acp-diff-path { font-size: 11px; font-family: var(--mono); color: var(--text-muted); padding: 4px 8px; background: var(--surface-2); border-bottom: 1px solid var(--border); }
+.acp-diff pre { margin: 0; padding: 8px; font-family: var(--mono); font-size: 11.5px; color: var(--success); white-space: pre-wrap; }
+
+.acp-perm {
+  border: 1px solid color-mix(in srgb, var(--warn) 40%, var(--border));
+  border-radius: var(--radius-sm); background: color-mix(in srgb, var(--warn) 8%, var(--surface-2));
+  padding: 10px;
+}
+.acp-perm-head { font-size: 12px; font-weight: 600; color: var(--warn); margin-bottom: 6px; }
+.acp-perm-content { margin: 0 0 8px; font-family: var(--mono); font-size: 11.5px; color: var(--text-muted); white-space: pre-wrap; max-height: 140px; overflow-y: auto; }
+.acp-perm-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.acp-perm-btn {
+  font-size: 12px; padding: 5px 12px; border-radius: var(--radius-sm);
+  border: 1px solid var(--border-strong); background: var(--surface-hover);
+  color: var(--text); cursor: pointer; transition: background var(--dur) var(--ease);
+}
+.acp-perm-btn:hover { background: var(--surface); }
+.acp-perm-btn.kind-allow_once, .acp-perm-btn.kind-allow_always {
+  border-color: transparent; background: var(--accent); color: #fff;
+}
+.acp-perm-btn.kind-allow_once:hover, .acp-perm-btn.kind-allow_always:hover { background: var(--accent-hover); }
+.acp-perm-btn.kind-reject_once, .acp-perm-btn.kind-reject_always { color: var(--danger); }

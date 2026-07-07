@@ -48,6 +48,7 @@ from repos import RepoIndex
 from slack import SlackService
 from slack.sentiment import SentimentService
 from automations import AutomationStore, automation_kinds_manifest
+from agents.collab import CollabRun
 from cicd import TeamCityService
 from docs_explorer import DocsService
 
@@ -467,7 +468,11 @@ def _start_pipeline(sub, transport, spec, backend, initial_input, workspace_id, 
                 await previous.task
             except (asyncio.CancelledError, Exception):
                 pass
-        await PipelineEngine(root, run, outputs=run.node_outputs).execute(initial_input)
+        try:
+            await PipelineEngine(root, run, outputs=run.node_outputs).execute(initial_input)
+        finally:
+            # Kill any ACP agent subprocesses this run spawned (also on cancel).
+            await run.close_acp()
 
     run.task = asyncio.create_task(_run())
     return run
@@ -548,6 +553,137 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             inbox.put_nowait(msg.get("text", ""))
         return
 
+    if mtype == "run_collab":
+        # Activate a Collab workspace: spin up its CollabRun (one agent process),
+        # ready to accept sessions. Cancels any prior run (re-run overrides).
+        wid = msg.get("workspace_id")
+        ws = workspaces.get(wid)
+        if not ws or getattr(ws, "surface", None) != "collab":
+            sub.send({"type": "error", "message": "no such collab workspace"})
+            return
+        prev = ws.run
+        if prev and getattr(prev, "task", None) and not prev.task.done():
+            prev.task.cancel()
+        run = CollabRun(hub, wid, msg.get("agent", "stub"), ws.dir)
+        run.task = asyncio.create_task(run.serve())
+        ws.run = run
+        run.send({"type": "collab_started", "agent": run.agent})
+        return
+
+    if mtype == "collab_add_session":
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            asyncio.create_task(run.add_session(kickoff=msg.get("kickoff")))
+        return
+
+    if mtype == "collab_fork_session":
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            asyncio.create_task(run.fork_session(
+                msg.get("from_session_id"), msg.get("seed_prompt"),
+                sender=getattr(sub, "presence_id", None)))
+        return
+
+    if mtype == "collab_prompt":
+        # Send-to-agent: a prompt turn on one session, tagged with the sender's
+        # presence id (server-authoritative — not trusting the client's claim).
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            asyncio.create_task(run.prompt(
+                msg.get("session_id"), msg.get("text", ""),
+                sender=getattr(sub, "presence_id", None)))
+        return
+
+    if mtype == "collab_chat":
+        # Broadcast-only chat message (not sent to the agent).
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            run.chat(msg.get("session_id"), msg.get("text", ""), getattr(sub, "presence_id", None))
+        return
+
+    if mtype == "prompt_typing":
+        # Live draft of a user's agent-prompt input (NOT chat) — relayed to all so
+        # others see what's being typed + where the caret is. Empty text clears.
+        hub.send({
+            "type": "prompt_draft", "workspace_id": msg.get("workspace_id"),
+            "session_id": msg.get("session_id"), "text": msg.get("text", ""),
+            "cursor": msg.get("cursor", 0), "user": getattr(sub, "presence_id", None),
+        })
+        return
+
+    if mtype == "annotation_select":
+        # A user's live/final text-selection annotation over an agent message —
+        # relay to all windows, stamping the authoritative sender. Ephemeral (not
+        # logged): an empty span (start == end) clears that user's annotation.
+        hub.send({
+            "type": "annotation_selection", "workspace_id": msg.get("workspace_id"),
+            "session_id": msg.get("session_id"), "seq": msg.get("seq"),
+            "start": msg.get("start"), "end": msg.get("end"),
+            "live": bool(msg.get("live")), "user": getattr(sub, "presence_id", None),
+        })
+        return
+
+    if mtype == "collab_cancel":
+        # Interrupt one session's current agent turn.
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            run.cancel(msg.get("session_id"))
+        return
+
+    if mtype == "collab_remove_session":
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            asyncio.create_task(run.remove_session(msg.get("session_id")))
+        return
+
+    if mtype == "stop_collab":
+        # Tear down the whole Collab runtime (kills agent + all sessions) but keep
+        # the workspace, so it can be Run again.
+        wid = msg.get("workspace_id")
+        ws = workspaces.get(wid)
+        run = ws.run if ws else None
+        if isinstance(run, CollabRun):
+            if run.task and not run.task.done():
+                run.task.cancel()
+            ws.run = None
+            hub.send({"type": "collab_stopped", "workspace_id": wid})
+        return
+
+    if mtype in ("acp_set_mode", "acp_set_model"):
+        # Change a running ACP session's mode/model — routed to its client. The
+        # target id is a node_id (pipeline) or a session_id (collab panel).
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        target = msg.get("node_id") or msg.get("session_id")
+        entry = getattr(run, "acp_sessions", {}).get(target) if run else None
+        if entry is not None:
+            client, session_id = entry
+            if mtype == "acp_set_mode":
+                method, params = "session/set_mode", {"sessionId": session_id, "modeId": msg.get("mode_id")}
+            else:
+                method, params = "session/set_model", {"sessionId": session_id, "modelId": msg.get("model_id")}
+            asyncio.create_task(client.request(method, params))  # fire-and-forget; agent echoes current_*_update
+        return
+
+    if mtype == "acp_finish":
+        # User pressed Finish on a conversational ACP node — signal its loop to end
+        # (sentinel None on the inbox), resolved via the workspace's run.
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        inbox = run.agent_inboxes.get(msg.get("node_id")) if run else None
+        if inbox is not None:
+            inbox.put_nowait(None)
+        return
+
+    if mtype == "acp_permission_reply":
+        # A window answered an ACP node's permission prompt — resolve the awaiting
+        # future on the workspace's run (shared, so any window can approve).
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        registry = getattr(run, "acp_perms", None) if run else None
+        if registry is not None:
+            fut = registry.get(msg.get("request_id"))  # token is globally unique
+            if fut is not None and not fut.done():
+                fut.set_result(msg.get("option_id"))
+        return
+
     if mtype == "attach_node":
         # Shared deep-link: resolve (workspace, node) -> its live session and
         # attach this connection to it (replay + live output), so a focused
@@ -589,6 +725,8 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             if run and run.task and not run.task.done():
                 for ev in list(run.event_log):
                     sub.send(ev)
+                if isinstance(run, CollabRun):
+                    run.resend_meta(sub)  # ensure this window has the full merged controls
         return
 
     if mtype == "presence_focus":
@@ -659,7 +797,8 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             hub.send(_workspace_list_event(created=existing.id))
             return
         try:
-            ws = workspaces.create(kind_id, fields, name=msg.get("name"))
+            ws = workspaces.create(kind_id, fields, name=msg.get("name"),
+                                   surface=msg.get("surface", "pipeline"))
         except WorkspaceError as e:
             sub.send({"type": "error", "message": str(e)})
             return
@@ -1094,6 +1233,8 @@ async def ws_endpoint(ws: WebSocket):
         manager.detach(sub)
         drain.cancel()
         hub.send(_presence_event())   # a window left — update everyone's roster
+        if getattr(sub, "presence_id", None):
+            hub.send({"type": "annotation_clear", "user": sub.presence_id})  # drop their annotations
         if hub.empty():
             # No windows left: drop all docs FS watchers (the UI re-registers its open
             # panels on reconnect, same as the TeamCity watched set).

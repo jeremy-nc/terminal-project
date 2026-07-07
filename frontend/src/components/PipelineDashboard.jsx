@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { runWorkspace, cancelWorkspace, setWorkspaceDsl, setWorkspaceTheme, mountNodeTerm, unmountTab } from "../terminalController.js";
+import { runWorkspace, cancelWorkspace, setWorkspaceDsl, setWorkspaceTheme, mountNodeTerm, unmountTab, replyAcpPermission, sendNodeInput, finishAcpNode, setAcpMode, setAcpModel } from "../terminalController.js";
 import { parseDsl } from "../pipelineDsl.js";
 import { b64dec } from "../wire.js";
 import OpenInTerminalButton from "./OpenInTerminalButton.jsx";
@@ -9,6 +9,7 @@ import { themeList } from "./world/themes/index.js";
 import TeamCityBranchBuilds from "./TeamCityBranchBuilds.jsx";
 import RepoBranchLinkPanel from "./RepoBranchLinkPanel.jsx";
 import DocsExplorer from "./DocsExplorer.jsx";
+import AcpNodeCard from "./AcpNodeCard.jsx";
 
 // ── 3D-world stage helpers: one room per top-level pipeline stage ────────────
 function stageLabel(node) {
@@ -165,6 +166,15 @@ export default function PipelineDashboard({ workspace, tabs, onPortal, worldEntr
       );
     }
 
+    if (node.type === "acp") {
+      return (
+        <div key={node.id || Math.random()} className="node-container terminal agent">
+          <div className="terminal-status-dot pending"></div>
+          <div className="terminal-id">ACP · {node.agent}</div>
+          <div className="terminal-argv">{node.prompt}</div>
+        </div>
+      );
+    }
     if (node.type === "iteration") {
       return (
         <div key={node.id || Math.random()} className="node-container batch iteration">
@@ -292,6 +302,29 @@ export default function PipelineDashboard({ workspace, tabs, onPortal, worldEntr
                 </div>
               );
             })}
+          </div>
+        </div>
+      );
+    }
+
+    if (node.type === "acp") {
+      const status = active.statusById?.[node.id] || "pending";
+      return (
+        <div key={node.id} id={`pl-node-${node.id}`} className="node-container batch live">
+          <div className="node-label">ACP · {node.agent}</div>
+          <div className="node-children parallel">
+            <AcpNodeCard
+              agent={node.agent}
+              status={status}
+              transcript={active.transcriptById?.[node.id]}
+              perm={active.permById?.[node.id]}
+              meta={active.acpMetaById?.[node.id]}
+              onReply={(reqId, optId) => replyAcpPermission(active.id, node.id, reqId, optId)}
+              onSend={(text) => sendNodeInput(active.id, node.id, text)}
+              onFinish={() => finishAcpNode(active.id, node.id)}
+              onSetMode={(id) => setAcpMode(active.id, node.id, id)}
+              onSetModel={(id) => setAcpModel(active.id, node.id, id)}
+            />
           </div>
         </div>
       );

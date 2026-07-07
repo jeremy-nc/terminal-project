@@ -16,6 +16,7 @@ import SharedNodeView from "./components/SharedNodeView.jsx";
 import PullRequestsDashboard from "./components/PullRequestsDashboard.jsx";
 import SlackDashboard from "./components/SlackDashboard.jsx";
 import CICDDashboard from "./components/CICDDashboard.jsx";
+import CollabDashboard from "./components/CollabDashboard.jsx";
 
 export default function App() {
   const { status, tabs, activeTabId, workspaces, workspaceOrder, activeWorkspaceId, kinds, closeBlocked, toasts,
@@ -110,6 +111,11 @@ export default function App() {
   // How many workspaces are mid-run — drives the Pipeline tab's "live" badge, so a
   // background automation run is discoverable even when its tab isn't focused.
   const runningCount = useMemo(() => workspaces.filter(w => w.status === "running").length, [workspaces]);
+  // Workspaces split by surface: the Pipeline screen shows pipeline (+ legacy,
+  // surface-less) workspaces; the Collab screen shows collab ones. Same store,
+  // filtered per screen.
+  const pipelineWorkspaces = useMemo(() => workspaces.filter(w => (w.surface || "pipeline") !== "collab"), [workspaces]);
+  const collabWorkspaces = useMemo(() => workspaces.filter(w => w.surface === "collab"), [workspaces]);
   // Live TeamCity builds — drives the CI/CD tab's badge, same idea as the Pipeline one.
   const cicdRunning = useMemo(
     () => (cicd?.teamcity?.builds || []).filter(b => b.state === "running" || b.state === "queued").length,
@@ -138,6 +144,12 @@ export default function App() {
             onClick={() => setView("terminal")}
           >
             Terminal
+          </button>
+          <button
+            className={`toggle-btn ${view === "collab" ? "active" : ""}`}
+            onClick={() => setView("collab")}
+          >
+            Collab
           </button>
           <button
             className={`toggle-btn ${view === "pipeline" ? "active" : ""}`}
@@ -208,7 +220,7 @@ export default function App() {
         </div>
       )}
 
-      <div className={`stage ${view === "pipeline" ? "pipeline-view" : ""}`}>
+      <div className={`stage ${view === "pipeline" || view === "collab" ? "pipeline-view" : ""}`}>
         {/* Both views stay mounted and toggle via display:none so neither's
             xterm instances (or PTY sessions) are disposed on switch — unmounting
             respawns shells and refits cold, which renders garbled. */}
@@ -216,21 +228,43 @@ export default function App() {
           className="pipeline-view-wrap"
           style={{ display: view === "pipeline" ? "flex" : "none" }}
         >
-          <WorkspaceTabBar workspaces={workspaces} order={workspaceOrder} activeWorkspaceId={activeWorkspaceId} kinds={kinds} closeBlocked={closeBlocked} newWorkspace={newWorkspace} repos={repos} />
+          <WorkspaceTabBar workspaces={pipelineWorkspaces} order={workspaceOrder} activeWorkspaceId={activeWorkspaceId} kinds={kinds} closeBlocked={closeBlocked} newWorkspace={newWorkspace} repos={repos} surface="pipeline" />
           <div className="ws-panels">
-            {workspaces.length === 0 ? (
+            {pipelineWorkspaces.length === 0 ? (
               <div className="ws-empty">Create a session (+) to define and run a pipeline.</div>
             ) : (
               // Every workspace's panel stays mounted; only the active one is
               // shown. Hiding (not unmounting) keeps each panel's node terminals
               // alive across tab switches — no lossy re-attach/replay.
-              workspaces.map((w) => (
+              pipelineWorkspaces.map((w) => (
                 <div
                   key={w.id}
                   className="ws-panel"
                   style={{ display: w.id === activeWorkspaceId ? "flex" : "none" }}
                 >
                   <PipelineDashboard workspace={w} tabs={tabs} onPortal={onPortal} worldEntry={worldEntry} />
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+
+        <div
+          className="collab-view-wrap"
+          style={{ display: view === "collab" ? "flex" : "none" }}
+        >
+          <WorkspaceTabBar workspaces={collabWorkspaces} order={workspaceOrder} activeWorkspaceId={activeWorkspaceId} kinds={kinds} closeBlocked={closeBlocked} newWorkspace={newWorkspace} repos={repos} surface="collab" />
+          <div className="ws-panels">
+            {collabWorkspaces.length === 0 ? (
+              <div className="ws-empty">Create a Collab session (+) to run ACP agents.</div>
+            ) : (
+              collabWorkspaces.map((w) => (
+                <div
+                  key={w.id}
+                  className="ws-panel"
+                  style={{ display: w.id === activeWorkspaceId ? "flex" : "none" }}
+                >
+                  <CollabDashboard workspace={w} />
                 </div>
               ))
             )}

@@ -8,7 +8,7 @@ import CloseWorkspaceModal from "./CloseWorkspaceModal.jsx";
  *  Tabs render in the decoupled `order` (drag a tab to reorder; persisted server-
  *  side). The create modal's open state lives in the controller (newWorkspace) so
  *  a deep-link / PR action can open it pre-filled too. */
-export default function WorkspaceTabBar({ workspaces, order = [], activeWorkspaceId, kinds, closeBlocked, newWorkspace, repos }) {
+export default function WorkspaceTabBar({ workspaces, order = [], activeWorkspaceId, kinds, closeBlocked, newWorkspace, repos, surface = "pipeline" }) {
   const [closingId, setClosingId] = useState(null);
   const [dragId, setDragId] = useState(null);     // workspace id being dragged
   const [overId, setOverId] = useState(null);     // tab currently hovered as drop target
@@ -91,7 +91,7 @@ export default function WorkspaceTabBar({ workspaces, order = [], activeWorkspac
               >×</button>}
         </div>
       ))}
-      <button className="ws-new" onClick={() => openNewWorkspace()} title="New workspace">+</button>
+      <button className="ws-new" onClick={() => openNewWorkspace({ surface })} title="New workspace">+</button>
 
       {newWorkspace && (
         <NewWorkspaceModal
@@ -99,7 +99,7 @@ export default function WorkspaceTabBar({ workspaces, order = [], activeWorkspac
           repos={repos}
           initial={newWorkspace}
           onClose={closeNewWorkspace}
-          onCreate={(kind, fields) => { createWorkspace(kind, fields); closeNewWorkspace(); }}
+          onCreate={(kind, fields) => { createWorkspace(kind, fields, surface); closeNewWorkspace(); }}
         />
       )}
 

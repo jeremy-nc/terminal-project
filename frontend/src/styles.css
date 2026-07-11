@@ -332,7 +332,7 @@ html, body { background: var(--bg); }
 .collab-side-head { padding: 12px 14px; border-bottom: 1px solid var(--border); display: flex; flex-direction: column; gap: 4px; }
 .collab-title { font-size: 13px; font-weight: 600; color: var(--text); }
 .collab-dir { font-size: 11px; color: var(--text-faint); font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.collab-side-actions { margin-top: auto; padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.collab-side-actions { padding: 14px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid var(--border); }
 .collab-agent-label { font-size: 11px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.04em; }
 .collab-agent-active { font-size: 12px; color: var(--text-muted); }
 .collab-run, .collab-add {
@@ -341,8 +341,41 @@ html, body { background: var(--bg); }
 }
 .collab-run:hover, .collab-add:hover { background: var(--accent-hover); }
 
-.collab-panels { flex: 1; min-width: 0; display: flex; gap: 12px; padding: 12px; overflow-x: auto; }
+.collab-panels { position: relative; flex: 1; min-width: 0; display: flex; gap: 12px; padding: 12px; overflow-x: auto; }
 .collab-panels .ws-empty { flex: 1; }
+
+/* Markdown editor: overlays ONLY the panels region (anchored to .collab-panels). */
+.md-editor-overlay { position: absolute; inset: 0; z-index: 40; display: flex; flex-direction: column; background: var(--surface); }
+.md-editor-head { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.md-editor-name { font-size: 13px; font-weight: 600; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.md-editor-save { margin-left: auto; font-size: 12px; padding: 4px 12px; border-radius: 4px; border: none; background: var(--accent); color: #fff; cursor: pointer; }
+.md-editor-save:disabled { opacity: 0.5; cursor: default; }
+.md-editor-close { font-size: 16px; width: 26px; border-radius: 4px; border: 1px solid var(--border-strong); background: var(--surface-hover); color: var(--text-muted); cursor: pointer; }
+.md-editor-close:hover { color: var(--danger); }
+.md-editor-split { flex: 1; min-height: 0; display: flex; }
+.md-editor-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.md-editor-pane .w-md-editor { height: 100% !important; border-radius: 0; }
+.md-editor-msg { padding: 16px; color: var(--text-faint); }
+.md-editor-msg.err { color: var(--danger); }
+/* The file-scoped agent, to the right of the editor. */
+.md-agent { width: 340px; flex: none; border-left: 1px solid var(--border); display: flex; flex-direction: column; background: var(--surface-2); }
+.md-agent-head { padding: 8px 12px; border-bottom: 1px solid var(--border); font-size: 12.5px; font-weight: 600; color: var(--text); }
+.md-agent-empty { padding: 16px; font-size: 12px; color: var(--text-faint); }
+.md-agent-feed { flex: 1; min-height: 0; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+.md-agent-input { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--border); }
+.md-agent-input textarea { flex: 1; resize: none; background: var(--surface); border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; color: var(--text); font-size: 12.5px; font-family: var(--sans); }
+.md-agent-input textarea:focus { outline: none; border-color: var(--accent); }
+.md-agent-input button { align-self: stretch; padding: 0 12px; border: none; border-radius: 4px; background: var(--accent); color: #fff; cursor: pointer; font-size: 12.5px; }
+.md-agent-input button:disabled { opacity: 0.5; cursor: default; }
+.md-chat { font-size: 12.5px; line-height: 1.45; border-radius: 6px; padding: 6px 9px; max-width: 100%; overflow-wrap: anywhere; }
+.md-chat.user { align-self: flex-end; background: var(--accent); color: #fff; }
+.md-chat.agent { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+.md-chat.agent :is(p, ul, ol) { margin: 4px 0; }
+.md-chat.agent :is(pre, code) { font-size: 11.5px; }
+.md-chat.thought { color: var(--text-faint); font-style: italic; font-size: 11.5px; }
+.md-chat.tool { color: var(--text-muted); font-family: var(--mono); font-size: 11px; }
+.md-chat.err { color: var(--danger); }
+.md-chat.thinking { color: var(--text-faint); }
 
 .collab-panel {
   width: 380px; flex: none; display: flex; flex-direction: column;
@@ -356,6 +389,35 @@ html, body { background: var(--bg); }
 .collab-panel-btn { font-size: 12px; width: 24px; padding: 3px 0; border-radius: 4px; border: 1px solid var(--border-strong); background: var(--surface-hover); color: var(--text-muted); cursor: pointer; }
 .collab-panel-btn:hover { color: var(--text); background: var(--surface); }
 .collab-panel-btn.close:hover { color: var(--danger); }
+
+/* The shared AgentPanel embedded in the Markdown editor fills the agent pane
+   (drops the standalone panel's fixed width / border / radius). */
+.md-agent .md-agent-panel { width: 100%; flex: 1; min-height: 0; border: none; border-radius: 0; background: transparent; }
+
+/* Delegated sub-agent panes: a coloured left edge + a lineage badge. */
+.collab-panel.delegated { border-left: 3px solid var(--accent); }
+.collab-panel.delegated.gated { border-left-color: var(--warn); }
+.collab-panel.delegated.watching { border-left-style: dashed; border-left-color: var(--text-faint); }
+.collab-readonly-note { font-size: 11.5px; color: var(--text-faint); padding: 6px 2px; text-align: center; }
+.collab-readonly-note b { color: var(--text-muted); }
+.collab-deleg-badge {
+  font-size: 10.5px; padding: 2px 7px; border-radius: 999px;
+  background: var(--surface-hover); color: var(--text-muted); border: 1px solid var(--border);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 190px;
+}
+.collab-deleg-badge.auto { color: var(--accent); border-color: var(--accent); }
+.collab-deleg-badge.watching { color: var(--text-faint); border-color: var(--border-strong); }
+.collab-deleg-badge.human-gated { color: var(--warn); border-color: var(--warn); }
+.collab-deleg-badge.returned, .collab-deleg-badge.done { color: var(--success); border-color: var(--success); }
+.collab-deleg-act {
+  margin-left: auto; font-size: 11px; padding: 3px 8px; border-radius: 4px; cursor: pointer;
+  border: 1px solid var(--border-strong); background: var(--surface-hover); color: var(--text);
+}
+.collab-deleg-act.take:hover { border-color: var(--warn); color: var(--warn); }
+.collab-deleg-act.return { border-color: var(--success); color: var(--success); }
+.collab-deleg-act.return:hover { background: var(--success); color: var(--surface); }
+/* When a delegation action is present it takes the margin-left:auto; keep Fork tidy. */
+.collab-deleg-act + .collab-fork { margin-left: 8px; }
 .collab-stop { font-size: 13px; padding: 8px 12px; border-radius: var(--radius-sm); cursor: pointer; border: 1px solid var(--border-strong); background: var(--surface-hover); color: var(--text-muted); }
 .collab-stop:hover { color: var(--danger); background: var(--surface); }
 
@@ -368,6 +430,36 @@ html, body { background: var(--bg); }
 .collab-annlayer { position: absolute; top: 0; left: 0; width: 100%; pointer-events: none; z-index: 1; }
 .collab-ann { position: absolute; border-radius: 2px; opacity: 0.26; border-bottom: 2px solid; }
 .collab-ann.live { opacity: 0.4; }
+/* Review-annotation highlights: saved (persistent) + pending (while noting). */
+.collab-review-hl { position: absolute; border-radius: 2px; }
+.collab-review-hl.saved.add { background: rgba(245, 195, 70, 0.22); border-bottom: 2px solid rgba(245, 195, 70, 0.85); }
+.collab-review-hl.saved.fork { background: rgba(80, 150, 245, 0.22); border-bottom: 2px solid rgba(80, 150, 245, 0.9); }
+.collab-review-hl.pending { background: rgba(245, 195, 70, 0.45); border-bottom: 2px solid #f5c346; }
+.collab-review-hl.clickable { pointer-events: auto; cursor: pointer; }
+.collab-review-hl.clickable:hover { filter: brightness(1.4); }
+/* Popup to view (read-only) or edit an annotation. */
+/* Annotation modal — ONE look for add / edit / view (see AnnotationModal). */
+.collab-ann-modal {
+  position: fixed; z-index: 65; width: 280px; max-width: 90vw; font-size: 12px;
+  background: var(--surface); border: 1px solid var(--border-strong); border-radius: 6px;
+  padding: 8px; box-shadow: 0 6px 18px rgba(0,0,0,0.45); display: flex; flex-direction: column; gap: 6px;
+}
+.collab-ann-modal.wide { width: 340px; }   /* add mode: room for Add + Fork */
+.collab-ann-modal-snip { font-family: var(--mono); font-size: 11px; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.collab-ann-modal-snip.add { color: #f5c346; }
+.collab-ann-modal-snip.fork { color: #5096f5; }
+.collab-ann-modal-by { font-size: 10.5px; font-family: var(--mono); }
+.collab-ann-modal-note { color: var(--text); white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+.collab-ann-modal-tag { color: var(--text-faint); font-size: 10.5px; }
+.collab-ann-modal-row { display: flex; gap: 6px; align-items: center; }
+.collab-ann-modal-input { flex: 1; background: var(--surface-2); border: 1px solid var(--border); border-radius: 4px; padding: 4px 7px; color: var(--text); font-size: 12px; font-family: var(--sans); }
+.collab-ann-modal-input:focus { outline: none; border-color: var(--accent); }
+.collab-ann-modal-primary { background: var(--accent); color: #fff; border: none; border-radius: 4px; padding: 4px 10px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+.collab-ann-modal-primary:disabled { opacity: 0.5; cursor: default; }
+.collab-ann-modal-secondary { background: var(--surface-hover); color: var(--text); border: 1px solid var(--border-strong); border-radius: 4px; padding: 4px 8px; cursor: pointer; font-size: 12px; white-space: nowrap; }
+.collab-ann-modal-secondary:hover { border-color: var(--accent); color: var(--accent); }
+.collab-ann-modal-del { align-self: flex-start; font-size: 11px; background: none; border: none; color: var(--text-faint); cursor: pointer; padding: 0; }
+.collab-ann-modal-del:hover { color: var(--danger); }
 
 .collab-bubble { max-width: 82%; padding: 7px 10px; border-radius: 10px; font-size: 13px; word-break: break-word; }
 .collab-bubble.left { align-self: flex-start; background: var(--accent-soft); color: var(--text); }
@@ -394,6 +486,27 @@ html, body { background: var(--bg); }
 .collab-tool-out { margin: 6px 0 0; font-family: var(--mono); font-size: 11px; white-space: pre-wrap; color: var(--text-faint); max-height: 120px; overflow-y: auto; }
 
 .collab-inputs { border-top: 1px solid var(--border); padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+
+/* The annotation list above the prompt. */
+.collab-ann-list { border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); padding: 6px; display: flex; flex-direction: column; gap: 4px; }
+.collab-ann-head { display: flex; align-items: center; gap: 6px; }
+.collab-ann-count { font-size: 11.5px; color: var(--text-muted); }
+.collab-ann-include {
+  margin-left: auto; font-size: 11px; padding: 3px 8px; border-radius: 4px; cursor: pointer;
+  background: var(--accent); color: #fff; border: none;
+}
+.collab-ann-clear { font-size: 13px; width: 22px; border-radius: 4px; border: 1px solid var(--border-strong); background: var(--surface-hover); color: var(--text-muted); cursor: pointer; }
+.collab-ann-clear:hover { color: var(--danger); }
+.collab-ann-item { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; cursor: pointer; border-radius: 4px; padding: 1px 3px; }
+.collab-ann-item:hover { background: var(--surface-hover); }
+.collab-ann-item.stale { opacity: 0.5; }
+.collab-ann-snip { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; flex: none; }
+.collab-ann-item.add .collab-ann-snip { color: #f5c346; }
+.collab-ann-item.fork .collab-ann-snip { color: #5096f5; }
+.collab-ann-by { font-size: 9.5px; font-family: var(--mono); padding: 0 4px; border: 1px solid; border-radius: 3px; flex: none; line-height: 1.5; }
+.collab-ann-note { color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.collab-ann-del { font-size: 12px; width: 18px; border: none; background: none; color: var(--text-faint); cursor: pointer; }
+.collab-ann-del:hover { color: var(--danger); }
 /* Shared, co-edited prompt textarea with other users' live carets (ID chips). */
 .collab-textwrap { position: relative; flex: 1; display: flex; }
 textarea.collab-input.agent { flex: 1; resize: vertical; min-height: 54px; line-height: 1.4; font-family: var(--sans); }
@@ -978,6 +1091,8 @@ textarea.collab-input.agent { flex: 1; resize: vertical; min-height: 54px; line-
 .docs-path { font-size: 11px; color: var(--text-muted); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 1px 6px; }
 .docs-tree { flex: 1; min-height: 0; overflow-y: auto; font-size: 12.5px; }
 .docs-row { display: flex; align-items: center; gap: 6px; padding: 2px 4px; border-radius: 4px; white-space: nowrap; color: var(--text-muted); }
+.docs-row.file.openable { cursor: pointer; }
+.docs-row.file.openable:hover { background: var(--surface-hover); color: var(--text); }
 .docs-row.dir { cursor: pointer; user-select: none; }
 .docs-row:hover { background: var(--surface-hover, rgba(255,255,255,0.05)); }
 .docs-caret { width: 10px; flex: none; color: var(--text-faint); font-size: 9px; text-align: center; }

@@ -249,5 +249,7 @@ class AcpSession:
             option_id = await fut
         finally:
             self._perms.pop(token, None)
+        # Resolved (any window answered) — clear the prompt for EVERYONE.
+        self._emit({"type": "acp_permission_clear", "request_id": token})
         self._emit({"type": "node_status", "status": "running"})
         return _selected(option_id)

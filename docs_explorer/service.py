@@ -89,6 +89,17 @@ class DocsService:
             self._emit(d)                  # send the current tree to freshly-opened panels
         return sorted(want)
 
+    def is_allowed(self, path):
+        """True if ``path`` resolves INSIDE a currently-watched docs dir. This is the
+        security boundary for file read/write: only files under a docs/specs folder
+        that the UI has open are reachable — never arbitrary paths (.env, secrets)."""
+        if not path:
+            return False
+        rp = os.path.realpath(os.path.expanduser(path))
+        with self._lock:
+            roots = [os.path.realpath(os.path.expanduser(d)) for d in self._watches]
+        return any(rp == r or rp.startswith(r + os.sep) for r in roots)
+
     def _target_for(self, d):
         """What to actually hand watchdog: the docs dir itself (recursive) when it
         exists, else its parent (non-recursive) so we notice it being created.

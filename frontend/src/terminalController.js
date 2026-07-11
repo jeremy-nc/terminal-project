@@ -135,6 +135,12 @@ function _blankRunState() {
     // permission prompt, id -> session controls { modes, models, commands }.
     // (id is a node_id for pipeline, a session_id for collab.)
     transcriptById: {}, permById: {}, acpMetaById: {},
+    // Delegated sub-agent panes: sub session_id -> { parent, status, task }.
+    // status: "auto" (auto-running) | "human-gated" (a human took over) | "returned".
+    delegations: {},
+    // Review annotations: session_id -> [ {id, seq, text, note, by} ]. Highlighted
+    // snippet + a note; compiled into the next prompt on "Include annotations".
+    annotationsBySession: {},
     // Collab runtime: { active, agent, sessions: [session_id...] }.
     collab: { active: false, agent: null, sessions: [] },
     // Live annotation selections over agent messages: user -> { sessionId, seq, start, end, live }.
@@ -338,7 +344,13 @@ function _handleMsg(msg) {
           ? { ...existing.get(d.id), name: d.name, dir: d.dir, kind: d.kind, meta: d.meta, theme: d.theme || "tropical", surface: d.surface || "pipeline", closing: d.closing }
           : { id: d.id, name: d.name, dir: d.dir, dsl: d.dsl || "", kind: d.kind || "directory", meta: d.meta || {}, theme: d.theme || "tropical", surface: d.surface || "pipeline", closing: d.closing, ..._blankRunState() }
       );
-      let active = msg.created || _state.activeWorkspaceId;
+      // A newly-created workspace only auto-navigates the window that CREATED it
+      // (created_by === this window's presence id). Everyone else sees the new tab
+      // appear but stays focused on their current one. (created_by absent → legacy
+      // / deep-link flows still navigate, preserving prior behaviour.)
+      const mineToOpen = msg.created &&
+        (msg.created_by == null || msg.created_by === _selfPresenceId);
+      let active = (mineToOpen ? msg.created : null) || _state.activeWorkspaceId;
       if (!merged.find((w) => w.id === active)) {
         // Default to the FIRST tab in the displayed (reconciled) order — not the
         // workspace store's insertion order — so a refresh opens the leading tab.
@@ -452,6 +464,16 @@ function _handleMsg(msg) {
     }
     case "docs_tree": {
       _setState({ docsTrees: { ..._state.docsTrees, [msg.dir]: { tree: msg.tree || [], exists: !!msg.exists } } });
+      break;
+    }
+    case "file_content": { _resolveFileReq("r", msg); break; }
+    case "file_saved": { _resolveFileReq("w", msg); break; }
+    case "editor_agent_opened": {
+      const req = _editorAgentReqs.get(msg.file);
+      if (req) {
+        _editorAgentReqs.delete(msg.file);
+        msg.error ? req.reject(new Error(msg.error)) : req.resolve(msg.session_id);
+      }
       break;
     }
     case "workspace_ensured": {
@@ -630,6 +652,19 @@ function _handleMsg(msg) {
       }));
       break;
     }
+    case "acp_permission_clear": {
+      // Someone answered the prompt — drop it for EVERY window (match by request id
+      // so a newer prompt on the same node/session isn't cleared by a stale reply).
+      const wid = msg.workspace_id, id = msg.node_id ?? msg.session_id;
+      if (id == null || !wid) break;
+      _patchWorkspace(wid, (w) => {
+        if (w.permById?.[id]?.requestId !== msg.request_id) return {};
+        const next = { ...(w.permById || {}) };
+        delete next[id];
+        return { permById: next };
+      });
+      break;
+    }
     case "collab_started": {
       // A Collab workspace's runtime came up — record the chosen agent + mark active.
       const wid = msg.workspace_id;
@@ -639,14 +674,42 @@ function _handleMsg(msg) {
     }
     case "collab_session_added":
     case "collab_session_forked": {
-      // A new agent session/panel opened — append its id.
+      // A new agent session/panel opened — append its id. A `parent` marks it as a
+      // delegated sub-agent pane (spawned by another session's delegate tool).
       const wid = msg.workspace_id;
       if (!wid || !msg.session_id) break;
       _patchWorkspace(wid, (w) => {
         const sessions = (w.collab?.sessions) || [];
-        return sessions.includes(msg.session_id) ? {}
+        const patch = sessions.includes(msg.session_id) ? {}
           : { collab: { ...(w.collab || { active: true, sessions: [] }), sessions: [...sessions, msg.session_id] } };
+        if (msg.parent) {
+          patch.delegations = { ...(w.delegations || {}),
+            [msg.session_id]: { ...(w.delegations?.[msg.session_id] || {}), parent: msg.parent } };
+        }
+        return patch;
       });
+      break;
+    }
+    case "collab_annotations": {
+      // Full review-annotation list for a session (replace).
+      const wid = msg.workspace_id, sid = msg.session_id;
+      if (!wid || !sid) break;
+      _patchWorkspace(wid, (w) => ({
+        annotationsBySession: { ...(w.annotationsBySession || {}), [sid]: msg.annotations || [] },
+      }));
+      break;
+    }
+    case "collab_delegation": {
+      // A delegated sub-agent's lifecycle: auto -> (human-gated) -> returned.
+      const wid = msg.workspace_id;
+      if (!wid || !msg.session_id) break;
+      _patchWorkspace(wid, (w) => ({
+        delegations: { ...(w.delegations || {}), [msg.session_id]: {
+          ...(w.delegations?.[msg.session_id] || {}),
+          parent: msg.parent ?? w.delegations?.[msg.session_id]?.parent,
+          status: msg.status, task: msg.task ?? w.delegations?.[msg.session_id]?.task,
+        } },
+      }));
       break;
     }
     case "collab_session_removed": {
@@ -1009,6 +1072,44 @@ export function unwatchTeamCityBuildType(buildTypeId, branch) {
 // dir exactly once; it drops out of the watched set when the last unmounts.
 const _docsWatchers = new Map();   // dir -> count
 function _sendWatchedDocs() { _send({ type: "docs_set_watched", dirs: [..._docsWatchers.keys()] }); }
+// Markdown editor: request/response over the WS, resolved by path.
+const _fileReqs = new Map();  // "r:"+path | "w:"+path -> { resolve, reject }
+export function readFile(path) {
+  return new Promise((resolve, reject) => {
+    _fileReqs.set("r:" + path, { resolve, reject });
+    _send({ type: "read_file", path });
+  });
+}
+export function writeFile(path, content) {
+  return new Promise((resolve, reject) => {
+    _fileReqs.set("w:" + path, { resolve, reject });
+    _send({ type: "write_file", path, content });
+  });
+}
+function _resolveFileReq(kind, msg) {
+  const key = kind + ":" + msg.path;
+  const req = _fileReqs.get(key);
+  if (!req) return;
+  _fileReqs.delete(key);
+  if (msg.error) req.reject(new Error(msg.error));
+  else req.resolve(kind === "r" ? (msg.content ?? "") : undefined);
+}
+
+// The markdown editor's dedicated file-scoped agent.
+const _editorAgentReqs = new Map();  // file -> { resolve, reject }
+export function openEditorAgent(workspaceId, file) {
+  return new Promise((resolve, reject) => {
+    _editorAgentReqs.set(file, { resolve, reject });
+    _send({ type: "open_editor_agent", workspace_id: workspaceId, file });
+  });
+}
+export function editorAgentPrompt(workspaceId, sessionId, text) {
+  _send({ type: "editor_agent_prompt", workspace_id: workspaceId, session_id: sessionId, text });
+}
+export function closeEditorAgent(workspaceId, sessionId) {
+  _send({ type: "close_editor_agent", workspace_id: workspaceId, session_id: sessionId });
+}
+
 export function watchDocs(dir) {
   if (!dir) return;
   const c = _docsWatchers.get(dir) || 0;
@@ -1236,6 +1337,24 @@ export function collabPrompt(workspaceId, sessionId, text) {
 export function collabChat(workspaceId, sessionId, text) {
   _send({ type: "collab_chat", workspace_id: workspaceId, session_id: sessionId, text });
 }
+/** Save a review annotation (highlighted text + note) on a session. start/end are
+ *  text offsets within the message so the snippet can be re-highlighted. */
+export function collabAddAnnotation(workspaceId, sessionId, seq, start, end, text, note, kind = "add") {
+  _send({ type: "collab_annotation_add", workspace_id: workspaceId, session_id: sessionId, seq, start, end, text, note, kind });
+}
+export function collabRemoveAnnotation(workspaceId, sessionId, id) {
+  _send({ type: "collab_annotation_remove", workspace_id: workspaceId, session_id: sessionId, id });
+}
+export function collabUpdateAnnotation(workspaceId, sessionId, id, note) {
+  _send({ type: "collab_annotation_update", workspace_id: workspaceId, session_id: sessionId, id, note });
+}
+export function collabClearAnnotations(workspaceId, sessionId) {
+  _send({ type: "collab_annotation_clear", workspace_id: workspaceId, session_id: sessionId });
+}
+/** Fork a sub-agent to explore a highlighted excerpt (carries context, returns to source). */
+export function collabExploreSelection(workspaceId, sessionId, text, note) {
+  _send({ type: "collab_explore_selection", workspace_id: workspaceId, session_id: sessionId, text, note });
+}
 /** Interrupt one session's current agent turn. */
 export function collabCancel(workspaceId, sessionId) {
   _send({ type: "collab_cancel", workspace_id: workspaceId, session_id: sessionId });
@@ -1243,6 +1362,14 @@ export function collabCancel(workspaceId, sessionId) {
 /** Close one agent session/panel. */
 export function collabRemoveSession(workspaceId, sessionId) {
   _send({ type: "collab_remove_session", workspace_id: workspaceId, session_id: sessionId });
+}
+/** A human grabs an auto-running delegated sub-agent -> human-gated. */
+export function collabTakeOver(workspaceId, sessionId) {
+  _send({ type: "collab_take_over", workspace_id: workspaceId, session_id: sessionId });
+}
+/** Hand a human-gated sub-agent's result back to the delegating agent. */
+export function collabReturn(workspaceId, sessionId, summary) {
+  _send({ type: "collab_return", workspace_id: workspaceId, session_id: sessionId, summary });
 }
 /** Stop the whole Collab runtime (keeps the workspace so it can be Run again). */
 export function stopCollab(workspaceId) {

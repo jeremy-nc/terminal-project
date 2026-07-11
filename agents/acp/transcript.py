@@ -119,6 +119,41 @@ class Transcript:
         return self._new("tool_call", id=None, title=title, tool=tool,
                          status=status, input=input, output="")
 
+    # ── SDK translation helpers ───────────────────────────────────────────────
+    # The Claude Agent SDK streams typed content blocks (thinking/text/tool_use)
+    # and injects tool results as user messages, rather than ACP's `session/update`
+    # notifications. These build the SAME entry shapes so the card renders both
+    # sources identically; the caller (SdkSession) mutates the returned entry
+    # across deltas and re-emits it, mirroring how `apply` coalesces chunks.
+    def new_message(self, role="assistant"):
+        """Open a fresh assistant message entry that grows across text deltas."""
+        self._cur_msg = None
+        return self._new("message", role=role, text="")
+
+    def new_thought(self):
+        """Open a fresh thought entry that grows across thinking deltas."""
+        self._cur_msg = None
+        return self._new("thought", text="")
+
+    def new_tool(self, tid, title, tool=None, input=None, status="pending"):
+        """Open a tool_call entry, registered by id so its result can update it."""
+        self._cur_msg = None
+        entry = self._new("tool_call", id=tid, title=title, tool=tool,
+                          status=status, input=input, output="")
+        if tid is not None:
+            self._by_tool[tid] = entry
+        return entry
+
+    def tool_result(self, tid, output, status):
+        """Fold a tool result (SDK ToolResultBlock) into its tool_call entry."""
+        entry = self._by_tool.get(tid)
+        if entry is None:
+            return None
+        if output:
+            entry["output"] = (entry.get("output") or "") + output
+        entry["status"] = status
+        return entry
+
     def finalize(self, stop_reason):
         self.status = "done" if stop_reason in (None, "end_turn") else "stopped"
         self.stop_reason = stop_reason

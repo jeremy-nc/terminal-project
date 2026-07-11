@@ -24,6 +24,7 @@ import json
 import os
 import re
 import secrets
+import tempfile
 from typing import Any
 from contextlib import asynccontextmanager
 
@@ -206,13 +207,16 @@ def _cicd_event() -> dict:
     return {"type": "cicd", "teamcity": teamcity_service.to_json()}
 
 
-def _workspace_list_event(created: str = None) -> dict:
+def _workspace_list_event(created: str = None, created_by: str = None) -> dict:
     return {
         "type": "workspace_list",
         # The transient `closing` flag rides alongside the persisted definition.
         "workspaces": [{**w.to_json(), "closing": getattr(w, "closing", False)}
                        for w in workspaces.list()],
         "created": created,
+        # Presence id of the window that created it — only THAT window auto-navigates
+        # to the new tab; everyone else sees it appear but stays where they are.
+        "created_by": created_by,
         # Kind manifest so the create modal can render kind-agnostically.
         "kinds": kinds_manifest(),
         # Decoupled display order (a separate store; Workspace has no order field).
@@ -322,6 +326,21 @@ async def lifespan(app: FastAPI):
     slack_task = asyncio.create_task(_poll_slack())
     cicd_task = asyncio.create_task(_poll_cicd())
     yield
+    # Gracefully tear down any active workspace runs so their agent subprocesses
+    # (SDK `claude` clients, ACP pools) are closed, not orphaned. The SDK also has
+    # an atexit safety net for its own children, but ACP pools aren't covered by it.
+    for ws in workspaces.list():
+        run = getattr(ws, "run", None)
+        if run is None:
+            continue
+        task = getattr(run, "task", None)
+        if task is not None and not task.done():
+            task.cancel()
+        if hasattr(run, "close"):
+            try:
+                await run.close()
+            except Exception:  # noqa: BLE001 — best-effort shutdown
+                pass
     pulls_task.cancel()
     slack_task.cancel()
     cicd_task.cancel()
@@ -601,6 +620,70 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             run.chat(msg.get("session_id"), msg.get("text", ""), getattr(sub, "presence_id", None))
         return
 
+    if mtype == "collab_annotation_add":
+        # Save a review annotation (highlighted text + note) on a session, shared.
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            run.add_annotation(msg.get("session_id"), msg.get("seq"), msg.get("start"), msg.get("end"),
+                               msg.get("text", ""), msg.get("note", ""), getattr(sub, "presence_id", None),
+                               kind=msg.get("kind", "add"))
+        return
+
+    if mtype == "collab_annotation_remove":
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            run.remove_annotation(msg.get("session_id"), msg.get("id"))
+        return
+
+    if mtype == "collab_annotation_update":
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            run.update_annotation(msg.get("session_id"), msg.get("id"), msg.get("note", ""))
+        return
+
+    if mtype == "collab_annotation_clear":
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            run.clear_annotations(msg.get("session_id"))
+        return
+
+    if mtype == "collab_explore_selection":
+        # Fork a sub-agent to explore a highlighted excerpt without holding up the
+        # source agent (returns to it on demand).
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            asyncio.create_task(run.explore_from_selection(
+                msg.get("session_id"), msg.get("text", ""), msg.get("note", ""),
+                sender=getattr(sub, "presence_id", None)))
+        return
+
+    if mtype == "open_editor_agent":
+        # Launch the dedicated markdown-editor agent for a file; reply to the asker.
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        file = msg.get("file", "")
+        if isinstance(run, CollabRun):
+            async def _open():
+                sid = await run.open_editor_agent(file)
+                sub.send({"type": "editor_agent_opened", "file": file, "session_id": sid})
+            asyncio.create_task(_open())
+        else:
+            sub.send({"type": "editor_agent_opened", "file": file, "session_id": None,
+                      "error": "Run a Collab session first"})
+        return
+
+    if mtype == "editor_agent_prompt":
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            asyncio.create_task(run.editor_agent_prompt(
+                msg.get("session_id"), msg.get("text", ""), sender=getattr(sub, "presence_id", None)))
+        return
+
+    if mtype == "close_editor_agent":
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            asyncio.create_task(run.close_editor_agent(msg.get("session_id")))
+        return
+
     if mtype == "prompt_typing":
         # Live draft of a user's agent-prompt input (NOT chat) — relayed to all so
         # others see what's being typed + where the caret is. Empty text clears.
@@ -636,6 +719,21 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             asyncio.create_task(run.remove_session(msg.get("session_id")))
         return
 
+    if mtype == "collab_take_over":
+        # A human grabs a running sub-agent -> human-gated (mirror: stop_task +
+        # resume; delegate: interrupt + wait for return).
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            asyncio.create_task(run.take_over(msg.get("session_id")))
+        return
+
+    if mtype == "collab_return":
+        # Hand a human-gated sub-agent's result back to the coordinator.
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            asyncio.create_task(run.return_to_coordinator(msg.get("session_id"), msg.get("summary")))
+        return
+
     if mtype == "stop_collab":
         # Tear down the whole Collab runtime (kills agent + all sessions) but keep
         # the workspace, so it can be Run again.
@@ -645,15 +743,28 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         if isinstance(run, CollabRun):
             if run.task and not run.task.done():
                 run.task.cancel()
+            # Close in a FRESH task (idempotent) so the multi-second subprocess
+            # teardown isn't interrupted by the cancelled keepalive task's unwind.
+            asyncio.create_task(run.close())
             ws.run = None
             hub.send({"type": "collab_stopped", "workspace_id": wid})
         return
 
     if mtype in ("acp_set_mode", "acp_set_model"):
-        # Change a running ACP session's mode/model — routed to its client. The
-        # target id is a node_id (pipeline) or a session_id (collab panel).
+        # Change a running session's mode/model. The target id is a node_id
+        # (pipeline) or a session_id (collab panel). Prefer the session object —
+        # both AcpSession and SdkSession expose set_mode/set_model — so an SDK
+        # panel works uniformly; fall back to the raw ACP client for pipeline
+        # nodes registered only in acp_sessions.
         run = _workspace_run(sub, msg.get("workspace_id"))
         target = msg.get("node_id") or msg.get("session_id")
+        sess = getattr(run, "sessions", {}).get(target) if run else None
+        if sess is not None and hasattr(sess, "set_mode"):
+            if mtype == "acp_set_mode":
+                asyncio.create_task(sess.set_mode(msg.get("mode_id")))
+            else:
+                asyncio.create_task(sess.set_model(msg.get("model_id")))
+            return
         entry = getattr(run, "acp_sessions", {}).get(target) if run else None
         if entry is not None:
             client, session_id = entry
@@ -794,7 +905,7 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         # this" on a PR whose worktree already exists navigates to it.
         existing = workspaces.find_existing(kind_id, fields)
         if existing is not None:
-            hub.send(_workspace_list_event(created=existing.id))
+            hub.send(_workspace_list_event(created=existing.id, created_by=sub.presence_id))
             return
         try:
             ws = workspaces.create(kind_id, fields, name=msg.get("name"),
@@ -806,7 +917,7 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         # dependabot branch we had to fetch), say so.
         if ws.meta.get("source") == "remote":
             sub.send({"type": "notice", "message": f"Fetched origin/{ws.meta.get('branch')} and created the worktree."})
-        hub.send(_workspace_list_event(created=ws.id))
+        hub.send(_workspace_list_event(created=ws.id, created_by=sub.presence_id))
         return
 
     if mtype == "ensure_workspace":
@@ -922,6 +1033,54 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         # an FS watcher per new dir (off-loop — set_watched does filesystem I/O) and
         # broadcast each new dir's tree; watchers fire further updates on OS events.
         asyncio.create_task(asyncio.to_thread(docs_service.set_watched, msg.get("dirs") or []))
+        return
+
+    if mtype == "read_file":
+        # Read a file for the markdown editor. Confined to a currently-watched docs
+        # dir (never arbitrary paths / secrets); replies only to the asking window.
+        path = msg.get("path", "")
+
+        def _read():
+            if not docs_service.is_allowed(path):
+                return {"error": "not permitted"}
+            rp = os.path.realpath(os.path.expanduser(path))
+            try:
+                if os.path.getsize(rp) > 2_000_000:
+                    return {"error": "file too large"}
+                with open(rp, "r", encoding="utf-8", errors="replace") as fh:
+                    return {"content": fh.read()}
+            except Exception as e:  # noqa: BLE001
+                return {"error": str(e)}
+
+        async def _do_read():
+            res = await asyncio.to_thread(_read)
+            sub.send({"type": "file_content", "path": path, **res})
+        asyncio.create_task(_do_read())
+        return
+
+    if mtype == "write_file":
+        # Save a file from the markdown editor (atomic write), same confinement.
+        path = msg.get("path", "")
+        content = msg.get("content", "")
+
+        def _write():
+            if not docs_service.is_allowed(path):
+                return {"error": "not permitted"}
+            rp = os.path.realpath(os.path.expanduser(path))
+            try:
+                d = os.path.dirname(rp)
+                fd, tmp = tempfile.mkstemp(dir=d, suffix=".tmp")
+                with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                    fh.write(content)
+                os.replace(tmp, rp)  # atomic
+                return {}
+            except Exception as e:  # noqa: BLE001
+                return {"error": str(e)}
+
+        async def _do_write():
+            res = await asyncio.to_thread(_write)
+            sub.send({"type": "file_saved", "path": path, **res})
+        asyncio.create_task(_do_write())
         return
 
     if mtype == "teamcity_project_builds":

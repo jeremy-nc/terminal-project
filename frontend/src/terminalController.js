@@ -10,6 +10,9 @@ import { FitAddon } from "@xterm/addon-fit";
 import { b64dec, strToB64 } from "./wire.js";
 import { APP_FX_TYPES } from "./appFx.js";
 import { parseDsl } from "./pipelineDsl.js";
+import {
+  configureDocTransport, applyDocSync, applyDocUpdate, applyDocAwareness, clearDocAwarenessUser,
+} from "./collabDoc.js";
 
 const WS_URL = `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/ws`;
 
@@ -202,6 +205,9 @@ function _send(obj) {
     _ws.send(JSON.stringify(obj));
   }
 }
+
+// Let collaborative Markdown docs (collabDoc.js) relay Yjs updates over this socket.
+configureDocTransport(_send);
 
 function _connect() {
   // Never open a second socket: a duplicate connection desyncs session
@@ -755,6 +761,26 @@ function _handleMsg(msg) {
         drafts[sid] = d;
         return { drafts };
       });
+      break;
+    }
+    case "doc_sync": {
+      // Reply to our doc_join: the file's replay log (+ whether it already existed,
+      // so the first opener seeds from disk). collabDoc keys purely by file string.
+      applyDocSync(msg.file, msg.existed, msg.updates);
+      break;
+    }
+    case "doc_update": {
+      if (msg.user && msg.user === _selfPresenceId) break;  // our own echo — already applied
+      applyDocUpdate(msg.file, msg.update);
+      break;
+    }
+    case "doc_awareness": {
+      if (msg.user && msg.user === _selfPresenceId) break;
+      applyDocAwareness(msg.file, msg.state);
+      break;
+    }
+    case "doc_awareness_clear": {
+      if (msg.user) clearDocAwarenessUser(msg.user);  // a window left — drop its doc cursor
       break;
     }
     case "annotation_clear": {

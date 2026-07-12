@@ -1,6 +1,7 @@
 import React, { useRef, useLayoutEffect, useState, useEffect } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { colorForId, short } from "../idColor.js";
 import {
   collabForkSession, collabPrompt, collabChat,
   collabCancel, collabRemoveSession, sendAnnotationSelect, sendPromptTyping, updateDraftLocal,
@@ -68,11 +69,6 @@ function DraftCursors({ taRef, draft, text, selfId, tick }) {
 }
 
 // ── annotations: per-user colour + char-offset ↔ DOM Range helpers ────────────
-export function colorForId(id) {
-  let h = 0;
-  for (let i = 0; i < (id || "").length; i++) h = (h * 31 + id.charCodeAt(i)) % 360;
-  return `hsl(${h}, 80%, 60%)`;
-}
 export function offsetInRoot(root, node, nodeOffset) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
   let offset = 0, n;
@@ -100,7 +96,6 @@ export function closestAnnRoot(node) {
   return el && el.closest ? el.closest(".collab-msg[data-ann-seq]") : null;
 }
 
-export function short(id) { return (id || "").slice(0, 6); }
 
 // Friendly labels for the agent's actions (ACP tool "kind") shown in the chat.
 const TOOL_VERB = {
@@ -208,8 +203,8 @@ const _pd = (e) => e.preventDefault();  // keep clicks from collapsing the selec
 /** One modal for the whole annotation lifecycle — the SAME component drives the
  *  "add" toolbar (fresh selection), the "edit" popup (your latest-response note),
  *  and the read-only "view" popup (older / forked). `mode` toggles the controls. */
-function AnnotationModal({ mode, snippet, kind = "add", by, note, setNote, x, y,
-                          onAdd, onFork, onSave, onRemove, onClose }) {
+export function AnnotationModal({ mode, snippet, kind = "add", by, note, setNote, x, y,
+                          onAdd, onFork, onSave, onRemove, onClose, allowFork = true }) {
   const editable = mode === "add" || mode === "edit";
   const isFork = kind === "fork";
   const snip = snippet.length > 90 ? snippet.slice(0, 90) + "…" : snippet;
@@ -230,8 +225,10 @@ function AnnotationModal({ mode, snippet, kind = "add", by, note, setNote, x, y,
             <>
               <button className="collab-ann-modal-primary" onMouseDown={_pd} onClick={onAdd} disabled={!note.trim()}
                       title="Add as an annotation for the next prompt">💬 Add</button>
-              <button className="collab-ann-modal-secondary" onMouseDown={_pd} onClick={onFork}
-                      title="Fork a sub-agent to explore this (runs independently, can Return to this agent)">🍴 Fork</button>
+              {allowFork && (
+                <button className="collab-ann-modal-secondary" onMouseDown={_pd} onClick={onFork}
+                        title="Fork a sub-agent to explore this (runs independently, can Return to this agent)">🍴 Fork</button>
+              )}
             </>
           ) : (
             <button className="collab-ann-modal-primary" onMouseDown={_pd} onClick={onSave}>Save</button>

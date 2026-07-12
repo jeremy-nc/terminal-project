@@ -57,6 +57,8 @@ class CollabRun:
         self.annotations = {}         # session_id -> [ {id, seq, text, note, by} ] review notes
         self.editor_agents = {}       # session_id -> {file, primed} markdown-editor agents (not panels)
         self._editor_by_file = {}     # realpath(file) -> session_id, so an editor agent is SHARED per file
+        self._doc_logs = {}           # file -> [b64 Yjs update] replay log for collaborative doc editing
+        self._doc_seen = set()        # files that have an active Y.Doc (so the FIRST joiner seeds from disk)
 
     # ── broadcast contract (mirrors PipelineRun.send) ─────────────────────────
     def send(self, event: dict) -> None:
@@ -101,6 +103,8 @@ class CollabRun:
                 d["release"].set_result("(workspace closed)")
         self._delegations.clear()
         self.mirrors.clear()
+        self._doc_logs.clear()
+        self._doc_seen.clear()
         sessions = list(self.sessions.values())
         self.sessions.clear()
 
@@ -461,6 +465,28 @@ class CollabRun:
         so closing one user's modal must not tear it down for others. It lives until the
         Collab session stops (``close()`` closes every session, editor agents included)."""
         return None
+
+    # ── collaborative doc editing (Yjs relayed over the shared socket) ─────────
+    # The server is a dumb relay: it never merges CRDT state, it just keeps a per-file
+    # replay LOG of opaque Yjs update blobs so a late joiner can catch up. Actual
+    # merging happens in every browser's Y.Doc. Kept off the run's event_log (these
+    # are file-scoped + high-volume) — broadcast happens via hub.send in server.py.
+    def doc_join(self, file: str):
+        """Return (existed, updates) for a joining client. ``existed`` is False for the
+        very FIRST joiner, which then seeds the doc from disk; others sync from the log."""
+        existed = file in self._doc_seen
+        self._doc_seen.add(file)
+        return existed, list(self._doc_logs.get(file, []))
+
+    def doc_append(self, file: str, update_b64: str) -> None:
+        """Append a Yjs update to the file's replay log (for future joiners)."""
+        self._doc_logs.setdefault(file, []).append(update_b64)
+
+    def doc_replace_state(self, file: str, state_b64: str) -> None:
+        """Compaction: replace the log with one encoded full-state blob so join
+        payloads stay bounded as edits accumulate."""
+        self._doc_seen.add(file)
+        self._doc_logs[file] = [state_b64]
 
     def cancel(self, session_id: str) -> None:
         """Interrupt one session's current agent turn."""

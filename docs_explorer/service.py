@@ -166,11 +166,17 @@ class DocsService:
                 info["target"], info["recursive"] = target, recursive
         self._emit(d)
 
-    def _emit(self, d):
+    def tree_event(self, d):
+        """Build the current ``docs_tree`` event for a dir (does FS I/O — call off-loop).
+        Used to hand ONE window its trees, since the watched set is a global union and
+        ``set_watched`` only broadcasts dirs that were newly-added to that union."""
         rp = os.path.expanduser(d)
         exists = os.path.isdir(rp)
-        event = {"type": "docs_tree", "dir": d, "exists": exists,
-                 "tree": _build_tree(rp) if exists else []}
+        return {"type": "docs_tree", "dir": d, "exists": exists,
+                "tree": _build_tree(rp) if exists else []}
+
+    def _emit(self, d):
+        event = self.tree_event(d)
         if self._loop is not None:
             self._loop.call_soon_threadsafe(self._broadcast, event)
 

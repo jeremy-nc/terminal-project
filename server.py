@@ -451,6 +451,14 @@ def _validate_cwds(spec: dict, global_cwd: str = None) -> str:
     return None
 
 
+def _watched_docs_union() -> list:
+    """Union of every connected window's watched docs dirs (the read/write boundary)."""
+    union = set()
+    for s in hub.subscribers():
+        union |= getattr(s, "watched_docs", set())
+    return sorted(union)
+
+
 def _workspace_run(sub: Subscriber, wid: str):
     """The live run for a workspace — resolved GLOBALLY via the workspace store
     (ws.run), so any connection (e.g. a shared deep-link) can reach a running
@@ -692,6 +700,32 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             "session_id": msg.get("session_id"), "text": msg.get("text", ""),
             "cursor": msg.get("cursor", 0), "user": getattr(sub, "presence_id", None),
         })
+        return
+
+    if mtype in ("doc_join", "doc_update", "doc_state", "doc_awareness"):
+        # Collaborative Markdown editing: Yjs updates + awareness relayed over the shared
+        # socket. The server is a DUMB relay — never merges CRDT state; it only keeps a
+        # per-file replay log (on the CollabRun) so a late joiner can catch up. Merging
+        # happens in each browser's Y.Doc. Kept off the run's event_log (file-scoped/high
+        # volume) — we broadcast via hub.send like prompt_typing.
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if not isinstance(run, CollabRun):
+            return
+        file = msg.get("file")
+        user = getattr(sub, "presence_id", None)
+        if mtype == "doc_join":
+            existed, updates = run.doc_join(file)
+            sub.send({"type": "doc_sync", "workspace_id": msg.get("workspace_id"),
+                      "file": file, "existed": existed, "updates": updates})
+        elif mtype == "doc_update":
+            run.doc_append(file, msg.get("update", ""))
+            hub.send({"type": "doc_update", "workspace_id": msg.get("workspace_id"),
+                      "file": file, "update": msg.get("update", ""), "user": user})
+        elif mtype == "doc_state":
+            run.doc_replace_state(file, msg.get("state", ""))  # compaction — cache only
+        else:  # doc_awareness — ephemeral cursors/selections, not logged
+            hub.send({"type": "doc_awareness", "workspace_id": msg.get("workspace_id"),
+                      "file": file, "state": msg.get("state"), "user": user})
         return
 
     if mtype == "annotation_select":
@@ -1029,10 +1063,21 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         return
 
     if mtype == "docs_set_watched":
-        # The UI's ref-counted union of open docs-explorer directories. Mirror it: start
-        # an FS watcher per new dir (off-loop — set_watched does filesystem I/O) and
-        # broadcast each new dir's tree; watchers fire further updates on OS events.
-        asyncio.create_task(asyncio.to_thread(docs_service.set_watched, msg.get("dirs") or []))
+        # Each window sends ITS OWN open docs-explorer/editor dirs; the server watches
+        # the UNION across all connections (so one window can't clobber another's — the
+        # security boundary is "some open window is showing this dir"). Off-loop I/O.
+        sub.watched_docs = set(msg.get("dirs") or [])
+        dirs = list(sub.watched_docs)
+
+        async def _apply():
+            await asyncio.to_thread(docs_service.set_watched, _watched_docs_union())
+            # Always hand THIS window fresh trees for its dirs — set_watched only
+            # broadcasts dirs newly-added to the global union, so a window joining a dir
+            # another window already watches would otherwise never receive its tree.
+            events = await asyncio.to_thread(lambda: [docs_service.tree_event(d) for d in dirs])
+            for ev in events:
+                sub.send(ev)
+        asyncio.create_task(_apply())
         return
 
     if mtype == "read_file":
@@ -1394,10 +1439,11 @@ async def ws_endpoint(ws: WebSocket):
         hub.send(_presence_event())   # a window left — update everyone's roster
         if getattr(sub, "presence_id", None):
             hub.send({"type": "annotation_clear", "user": sub.presence_id})  # drop their annotations
+            hub.send({"type": "doc_awareness_clear", "user": sub.presence_id})  # drop their doc cursor
+        # Recompute the watched-docs union without this window (drops its dirs; clears
+        # to [] when it was the last one). Other windows keep their dirs watched.
+        docs_service.set_watched(_watched_docs_union())
         if hub.empty():
-            # No windows left: drop all docs FS watchers (the UI re-registers its open
-            # panels on reconnect, same as the TeamCity watched set).
-            docs_service.set_watched([])
             for ws in workspaces.list():
                 run = ws.run
                 if run and run.task and not run.task.done():

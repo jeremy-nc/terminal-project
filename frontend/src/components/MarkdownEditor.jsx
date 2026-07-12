@@ -6,7 +6,7 @@ import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   readFile, writeFile, subscribe, getSnapshot, getSelfPresenceId,
-  openEditorAgent, editorAgentPrompt, watchDocs, unwatchDocs,
+  openEditorAgent, editorAgentPrompt, watchDocs, unwatchDocs, addAgentPromptItem,
 } from "../terminalController.js";
 import {
   acquireDoc, releaseDoc, getDocText, onDocChange, mergeExternalText,
@@ -258,6 +258,13 @@ export default function MarkdownEditor({ path, workspaceId, collabActive, onClos
     addDocAnnotation(path, { by: selfId, note: annNote.trim(), kind: "add", from: annSel.from, to: annSel.to });
     setAnnSel(null); setAnnNote("");
   };
+  // Send the selected raw markdown + the typed instruction to the agent panel as an
+  // "edit" item (not a doc annotation) — an external input to the shared prompt list.
+  const suggestEditToAgent = () => {
+    if (!annSel || !annNote.trim() || !agentSid) return;
+    addAgentPromptItem(workspaceId, agentSid, { kind: "edit", text: annSel.text, note: annNote.trim() });
+    setAnnSel(null); setAnnNote("");
+  };
 
   // Attach an image: embed as a data URI so it's self-contained + renders in preview.
   const onAttachClick = () => fileInputRef.current?.click();
@@ -329,7 +336,8 @@ export default function MarkdownEditor({ path, workspaceId, collabActive, onClos
           {annSel && (
             <AnnotationModal mode="add" snippet={annSel.text} note={annNote} setNote={setAnnNote}
                              x={annSel.x} y={annSel.y} allowFork={false}
-                             onAdd={addAnnotation} onClose={() => setAnnSel(null)} />
+                             onAdd={addAnnotation} onToAgent={agentSid ? suggestEditToAgent : undefined}
+                             onClose={() => setAnnSel(null)} />
           )}
           {popAnn && (
             <AnnotationModal mode="edit" snippet={popAnn.text} by={popAnn.by} note={popNote} setNote={setPopNote}
@@ -362,6 +370,7 @@ export default function MarkdownEditor({ path, workspaceId, collabActive, onClos
               selfId={selfId}
               index={0}
               features={EDITOR_FEATURES}
+              promptItems={agentSid ? ws?.promptItemsBySession?.[agentSid] : undefined}
               onSend={onAgentSend}
               placeholder="Ask to edit this file — shared, ⌘⏎ to send…"
               emptyHint='Ask the agent to change this file — e.g. "tighten the intro".'

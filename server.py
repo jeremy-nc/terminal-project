@@ -655,6 +655,27 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
             run.clear_annotations(msg.get("session_id"))
         return
 
+    if mtype == "collab_prompt_item_add":
+        # External prompt material (e.g. a doc selection → suggested edit), shared like
+        # an annotation. Stamped with the sender's presence id.
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            run.add_prompt_item(msg.get("session_id"), msg.get("kind", "edit"),
+                                msg.get("text", ""), msg.get("note", ""), getattr(sub, "presence_id", None))
+        return
+
+    if mtype == "collab_prompt_item_remove":
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            run.remove_prompt_item(msg.get("session_id"), msg.get("id"))
+        return
+
+    if mtype == "collab_prompt_item_clear":
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            run.clear_prompt_items(msg.get("session_id"))
+        return
+
     if mtype == "collab_explore_selection":
         # Fork a sub-agent to explore a highlighted excerpt without holding up the
         # source agent (returns to it on demand).

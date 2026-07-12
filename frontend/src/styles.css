@@ -552,6 +552,9 @@ html, body { background: var(--bg); }
 .collab-ann-snip { font-family: var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; flex: none; }
 .collab-ann-item.add .collab-ann-snip { color: #f5c346; }
 .collab-ann-item.fork .collab-ann-snip { color: #5096f5; }
+.collab-ann-item.edit .collab-ann-snip { color: #6ee7a8; }   /* external "edit" material from the doc */
+.collab-ann-item.edit { cursor: default; }
+.collab-ann-kind { font-size: 10px; flex: none; }
 .collab-ann-by { font-size: 9.5px; font-family: var(--mono); padding: 0 4px; border: 1px solid; border-radius: 3px; flex: none; line-height: 1.5; }
 .collab-ann-note { color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .collab-ann-del { font-size: 12px; width: 18px; border: none; background: none; color: var(--text-faint); cursor: pointer; }
@@ -2410,3 +2413,20 @@ textarea.collab-input.agent { flex: 1; resize: vertical; min-height: 54px; line-
 }
 .acp-perm-btn.kind-allow_once:hover, .acp-perm-btn.kind-allow_always:hover { background: var(--accent-hover); }
 .acp-perm-btn.kind-reject_once, .acp-perm-btn.kind-reject_always { color: var(--danger); }
+
+/* AskUserQuestion rendered as an interactive question (not raw JSON). */
+.acp-perm.acp-question { border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface-2)); }
+.acp-question-head { font-size: 12px; font-weight: 600; color: var(--accent); margin-bottom: 8px; }
+.acp-q { margin-bottom: 10px; }
+.acp-q-tag { display: inline-block; font-size: 9.5px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--text-muted); background: var(--surface-hover);
+  border-radius: 3px; padding: 1px 6px; margin-bottom: 5px; }
+.acp-q-text { font-size: 12.5px; color: var(--text); margin-bottom: 7px; line-height: 1.4; }
+.acp-q-opts { display: flex; flex-direction: column; gap: 5px; }
+.acp-q-opt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left;
+  padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
+  background: var(--surface); color: var(--text); cursor: pointer; transition: background var(--dur) var(--ease); }
+.acp-q-opt:hover { background: var(--surface-hover); border-color: var(--accent); }
+.acp-q-opt-label { font-size: 12.5px; font-weight: 600; }
+.acp-q-opt-desc { font-size: 11px; color: var(--text-muted); line-height: 1.35; }

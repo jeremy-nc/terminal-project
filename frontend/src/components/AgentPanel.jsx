@@ -7,7 +7,7 @@ import {
   collabCancel, collabRemoveSession, sendAnnotationSelect, sendPromptTyping, updateDraftLocal,
   setAcpMode, setAcpModel, replyAcpPermission, collabTakeOver, collabReturn,
   collabAddAnnotation, collabRemoveAnnotation, collabClearAnnotations, collabExploreSelection,
-  collabUpdateAnnotation,
+  collabUpdateAnnotation, removeAgentPromptItem, clearAgentPromptItems,
 } from "../terminalController.js";
 
 export const EMPTY_ARR = [];  // stable ref so memo holds when a session has no annotations
@@ -204,7 +204,7 @@ const _pd = (e) => e.preventDefault();  // keep clicks from collapsing the selec
  *  "add" toolbar (fresh selection), the "edit" popup (your latest-response note),
  *  and the read-only "view" popup (older / forked). `mode` toggles the controls. */
 export function AnnotationModal({ mode, snippet, kind = "add", by, note, setNote, x, y,
-                          onAdd, onFork, onSave, onRemove, onClose, allowFork = true }) {
+                          onAdd, onFork, onSave, onRemove, onClose, onToAgent, allowFork = true }) {
   const editable = mode === "add" || mode === "edit";
   const isFork = kind === "fork";
   const snip = snippet.length > 90 ? snippet.slice(0, 90) + "…" : snippet;
@@ -228,6 +228,10 @@ export function AnnotationModal({ mode, snippet, kind = "add", by, note, setNote
               {allowFork && (
                 <button className="collab-ann-modal-secondary" onMouseDown={_pd} onClick={onFork}
                         title="Fork a sub-agent to explore this (runs independently, can Return to this agent)">🍴 Fork</button>
+              )}
+              {onToAgent && (
+                <button className="collab-ann-modal-secondary" onMouseDown={_pd} onClick={onToAgent} disabled={!note.trim()}
+                        title="Send to the agent as a suggested edit (adds to its prompt list)">🤖 Suggest edit</button>
               )}
             </>
           ) : (
@@ -322,7 +326,7 @@ const EMPTY_FEATURES = {};  // stable ref so memo holds when features aren't pas
 // saves the file first, then prompts) while keeping the shared-draft machinery intact.
 export const AgentPanel = React.memo(function AgentPanel({ workspaceId, sessionId, transcript, perm, meta, annotations,
                      draft = EMPTY_DRAFT, status, selfId, index, delegation, parentIndex,
-                     annList = EMPTY_ARR, features = EMPTY_FEATURES, onSend, placeholder, className = "", emptyHint }) {
+                     annList = EMPTY_ARR, promptItems = EMPTY_ARR, features = EMPTY_FEATURES, onSend, placeholder, className = "", emptyHint }) {
   const feats = features || EMPTY_FEATURES;
   const showHeader = feats.header !== false;
   const showFork = feats.fork !== false;
@@ -491,19 +495,32 @@ export const AgentPanel = React.memo(function AgentPanel({ workspaceId, sessionI
     setAnnSel(null); setAnnNote("");
     window.getSelection()?.removeAllRanges?.();
   };
-  // Only the LATEST response's "add" annotations are includable (fork ones never).
+  // Prompt "material" compiled into the draft on demand: the LATEST response's "add"
+  // annotations (over agent output) PLUS external items pushed in from outside (e.g. a
+  // doc text-selection → a suggested "edit"). Both are {text, note} pairs; each carries
+  // `_src` so remove/clear/edit route to the right owner.
   const includable = annList.filter((a) => a.kind !== "fork" && a.seq === lastMsgSeq);
-  // Compile them into the shared prompt (note BEFORE the highlighted text). Annotations
-  // PERSIST — as the agent replies again, older ones simply stop being includable.
-  const includeAnnotations = () => {
-    if (!includable.length) return;
-    const lines = includable.map((a) => `${a.note} - ${a.text}`).join("\n");
+  const material = [
+    ...(showAnnotations ? includable.map((a) => ({ id: a.id, text: a.text, note: a.note, by: a.by, kind: a.kind, _src: "ann" })) : []),
+    ...promptItems.map((i) => ({ ...i, _src: "ext" })),
+  ];
+  // Compile all material into the shared prompt (note BEFORE the referenced text).
+  const includeMaterial = () => {
+    if (!material.length) return;
+    const lines = material.map((m) => `${m.note} - ${m.text}`).join("\n");
     const cur = (text || "").trim();
     const next = cur ? `${cur}\n${lines}` : lines;
     localAt.current = Date.now();
     setText(next); prevCaret.current = next.length;
     broadcastTyping(next, next.length); pushGlobal(next, next.length);
     taRef.current?.focus();
+  };
+  const removeMaterial = (m) => (m._src === "ext"
+    ? removeAgentPromptItem(workspaceId, sessionId, m.id)
+    : collabRemoveAnnotation(workspaceId, sessionId, m.id));
+  const clearMaterial = () => {
+    if (showAnnotations && includable.length) collabClearAnnotations(workspaceId, sessionId);
+    if (promptItems.length) clearAgentPromptItems(workspaceId, sessionId);
   };
 
   const dStatus = delegation?.status;
@@ -544,7 +561,32 @@ export const AgentPanel = React.memo(function AgentPanel({ workspaceId, sessionI
       <div className="collab-feed" ref={feed.ref} onScroll={feed.onScroll}>
         {entries.length === 0 && <div className="text-faint">{emptyHint || "No messages yet."}</div>}
         {entries.map((e) => <Bubble key={e.seq} e={e} selfId={selfId} workspaceId={workspaceId} sessionId={sessionId} annEnabled={showAnnotations} />)}
-        {perm && (
+        {perm && perm.questions ? (
+          <div className="acp-perm acp-question">
+            <div className="acp-question-head">❓ {perm.title}</div>
+            {perm.questions.map((q, qi) => (
+              <div key={qi} className="acp-q">
+                {q.header && <div className="acp-q-tag">{q.header}</div>}
+                {q.question && <div className="acp-q-text">{q.question}</div>}
+                <div className="acp-q-opts">
+                  {(q.options || []).map((o, oi) => (
+                    <button key={oi} className="acp-q-opt"
+                            onClick={() => replyAcpPermission(workspaceId, sessionId, perm.requestId, `q${qi}o${oi}`)}>
+                      <span className="acp-q-opt-label">{o.label}</span>
+                      {o.description && <span className="acp-q-opt-desc">{o.description}</span>}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <div className="acp-perm-actions">
+              {(perm.options || []).map((o) => (
+                <button key={o.id} className={`acp-perm-btn kind-${o.kind || "reject"}`}
+                        onClick={() => replyAcpPermission(workspaceId, sessionId, perm.requestId, o.id)}>{o.name}</button>
+              ))}
+            </div>
+          </div>
+        ) : perm && (
           <div className="acp-perm">
             <div className="acp-perm-head">⚠ {perm.title}</div>
             {perm.content && <pre className="acp-perm-content">{perm.content}</pre>}
@@ -587,28 +629,29 @@ export const AgentPanel = React.memo(function AgentPanel({ workspaceId, sessionI
         {dStatus === "watching" ? (
           <div className="collab-readonly-note">👁 Read-only mirror of an autonomous sub-agent — <b>Take over</b> to interact.</div>
         ) : (<>
-        {showAnnotations && includable.length > 0 && (
+        {material.length > 0 && (
           <div className="collab-ann-list">
             <div className="collab-ann-head">
-              <span className="collab-ann-count">📝 {includable.length} on this response</span>
-              <button className="collab-ann-include" onClick={includeAnnotations}
-                      title="Include this response's annotations in the prompt">
-                Include in prompt ({includable.length})
+              <span className="collab-ann-count">📝 {material.length} for the prompt</span>
+              <button className="collab-ann-include" onClick={includeMaterial}
+                      title="Append this material to the prompt">
+                Include in prompt ({material.length})
               </button>
-              <button className="collab-ann-clear" title="Clear all annotations"
-                      onClick={() => collabClearAnnotations(workspaceId, sessionId)}>×</button>
+              <button className="collab-ann-clear" title="Clear all" onClick={clearMaterial}>×</button>
             </div>
-            {includable.map((a) => (
-              <div key={a.id} className="collab-ann-item add" title="Click to edit"
-                   onClick={(e) => openAnnPopup(a.id, e.clientX, e.clientY)}>
-                {a.by && <span className="collab-ann-by" style={{ color: colorForId(a.by), borderColor: colorForId(a.by) }}
-                               title={`by ${a.by}`}>{short(a.by)}</span>}
-                <span className="collab-ann-snip" title={a.text}>
-                  "{a.text.length > 40 ? a.text.slice(0, 40) + "…" : a.text}"
+            {material.map((m) => (
+              <div key={m.id} className={`collab-ann-item ${m.kind === "edit" ? "edit" : "add"}`}
+                   title={m._src === "ann" ? "Click to edit" : "Suggested edit"}
+                   onClick={m._src === "ann" ? (e) => openAnnPopup(m.id, e.clientX, e.clientY) : undefined}>
+                {m.kind === "edit" && <span className="collab-ann-kind" title="Suggested edit from the document">✏️</span>}
+                {m.by && <span className="collab-ann-by" style={{ color: colorForId(m.by), borderColor: colorForId(m.by) }}
+                               title={`by ${m.by}`}>{short(m.by)}</span>}
+                <span className="collab-ann-snip" title={m.text}>
+                  "{m.text.length > 40 ? m.text.slice(0, 40) + "…" : m.text}"
                 </span>
-                <span className="collab-ann-note">{a.note}</span>
+                <span className="collab-ann-note">{m.note}</span>
                 <button className="collab-ann-del" title="Remove"
-                        onClick={(e) => { e.stopPropagation(); collabRemoveAnnotation(workspaceId, sessionId, a.id); }}>×</button>
+                        onClick={(e) => { e.stopPropagation(); removeMaterial(m); }}>×</button>
               </div>
             ))}
           </div>

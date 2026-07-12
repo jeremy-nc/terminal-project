@@ -55,6 +55,7 @@ class CollabRun:
         self._takeovers = {}          # taken-over mirror session_id -> {parent, description}
         self._closed = False          # close() is idempotent (may be called by cancel + stop)
         self.annotations = {}         # session_id -> [ {id, seq, text, note, by} ] review notes
+        self.prompt_items = {}        # session_id -> [ {id, kind, text, note, by} ] external prompt material
         self.editor_agents = {}       # session_id -> {file, primed} markdown-editor agents (not panels)
         self._editor_by_file = {}     # realpath(file) -> session_id, so an editor agent is SHARED per file
         self._doc_logs = {}           # file -> [b64 Yjs update] replay log for collaborative doc editing
@@ -371,6 +372,10 @@ class CollabRun:
                 sess.record_error(str(exc))
             finally:
                 self.send({"type": "node_status", "session_id": session_id, "status": "idle"})
+                # A new response landed → pending external prompt items (e.g. suggested
+                # edits) are stale, like annotations that are no longer the latest
+                # response. Clear them (no-op + no broadcast when there are none).
+                self.clear_prompt_items(session_id)
 
     def chat(self, session_id: str, text: str, sender: str) -> None:
         """A broadcast-only chat message (not sent to the agent)."""
@@ -417,6 +422,32 @@ class CollabRun:
         if self.annotations.get(session_id):
             self.annotations[session_id] = []
             self._broadcast_annotations(session_id)
+
+    # ── prompt inbox items (external "suggested edit" material, shared like annotations) ─
+    def _broadcast_prompt_items(self, session_id: str) -> None:
+        self.send({"type": "collab_prompt_items", "session_id": session_id,
+                   "items": list(self.prompt_items.get(session_id, []))})
+
+    def add_prompt_item(self, session_id: str, kind: str, text: str, note: str, by: str = None) -> None:
+        """Push external prompt material (e.g. a doc selection → a suggested edit) onto a
+        session, shared with every window, exactly like an annotation."""
+        if session_id not in self.sessions:
+            return
+        self.prompt_items.setdefault(session_id, []).append({
+            "id": secrets.token_hex(4), "kind": kind or "edit",
+            "text": text or "", "note": note or "", "by": by})
+        self._broadcast_prompt_items(session_id)
+
+    def remove_prompt_item(self, session_id: str, item_id: str) -> None:
+        lst = self.prompt_items.get(session_id)
+        if lst:
+            self.prompt_items[session_id] = [i for i in lst if i.get("id") != item_id]
+            self._broadcast_prompt_items(session_id)
+
+    def clear_prompt_items(self, session_id: str) -> None:
+        if self.prompt_items.get(session_id):
+            self.prompt_items[session_id] = []
+            self._broadcast_prompt_items(session_id)
 
     # ── markdown-editor agent (lives in the editor modal, edits the open file) ─
     async def open_editor_agent(self, file_path: str) -> str:
@@ -505,6 +536,7 @@ class CollabRun:
         self.mirrors.pop(session_id, None)       # a read-only mirror (no real session)
         self._takeovers.pop(session_id, None)
         self.annotations.pop(session_id, None)
+        self.prompt_items.pop(session_id, None)
         sess = self.sessions.pop(session_id, None)
         self.acp_sessions.pop(session_id, None)
         self._locks.pop(session_id, None)

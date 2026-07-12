@@ -15,6 +15,7 @@ routes over one client.
 import asyncio
 import json
 import os
+import re
 import secrets
 import uuid
 
@@ -102,6 +103,20 @@ def _tool_title(name: str, inp: dict) -> str:
     if name == "TodoWrite":
         return "Update todos"
     return name
+
+
+def _parse_ask_answer(choice: str, questions: list):
+    """Map a picked AskUserQuestion option id ('q{qi}o{oi}') back to (header, label)."""
+    m = re.fullmatch(r"q(\d+)o(\d+)", choice or "")
+    if not m:
+        return []
+    qi, oi = int(m.group(1)), int(m.group(2))
+    if 0 <= qi < len(questions):
+        q = questions[qi] or {}
+        opts = q.get("options") or []
+        if 0 <= oi < len(opts):
+            return [(q.get("header") or q.get("question") or "Answer", (opts[oi] or {}).get("label") or "")]
+    return []
 
 
 def make_delegate_server(on_delegate):
@@ -425,6 +440,12 @@ class SdkSession:
             return _sdk.PermissionResultAllow()
         if self._perms is None:
             return _sdk.PermissionResultDeny(message="no approver available")
+        # AskUserQuestion isn't a real headless tool — render it as an interactive
+        # question (nice UI, clickable answers) and feed the human's pick back to the
+        # agent as the tool's result (via a deny-with-message, the only channel a
+        # permission hook has to return text).
+        if str(tool_name) == "AskUserQuestion":
+            return await self._ask_user_question(tool_input)
         token = secrets.token_hex(4)
         fut = asyncio.get_running_loop().create_future()
         self._perms[token] = fut
@@ -447,3 +468,30 @@ class SdkSession:
         if choice in ("allow", "allow_always"):
             return _sdk.PermissionResultAllow()
         return _sdk.PermissionResultDeny(message="denied by user")
+
+    async def _ask_user_question(self, tool_input) -> "object":
+        """Surface an AskUserQuestion tool call as an interactive question and return the
+        human's selection to the agent. The pick arrives as an option id 'q{qi}o{oi}'."""
+        questions = (tool_input or {}).get("questions") or []
+        token = secrets.token_hex(4)
+        fut = asyncio.get_running_loop().create_future()
+        self._perms[token] = fut
+        self._emit({
+            "type": "acp_permission", "request_id": token, "tool": "ask",
+            "title": "The agent is asking", "questions": questions,
+            "options": [{"id": "__dismiss", "name": "Dismiss", "kind": "reject_once"}],
+        })
+        self._emit({"type": "node_status", "status": "waiting"})
+        try:
+            choice = await fut
+        finally:
+            self._perms.pop(token, None)
+        self._emit({"type": "acp_permission_clear", "request_id": token})
+        self._emit({"type": "node_status", "status": "running"})
+        answers = _parse_ask_answer(choice, questions)
+        if not answers:
+            return _sdk.PermissionResultDeny(message="The user dismissed the question without answering.")
+        picks = "; ".join(f"{h}: {label}" for h, label in answers)
+        return _sdk.PermissionResultDeny(
+            message=(f"[Answered by the user] {picks}. Treat this as the answer to your "
+                     f"AskUserQuestion and continue — do not ask it again."))

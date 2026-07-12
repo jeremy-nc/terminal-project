@@ -653,7 +653,7 @@ function _handleMsg(msg) {
       _patchWorkspace(wid, (w) => ({
         permById: { ...(w.permById || {}), [id]: {
           requestId: msg.request_id, title: msg.title, tool: msg.tool,
-          content: msg.content, options: msg.options || [],
+          content: msg.content, options: msg.options || [], questions: msg.questions || null,
         } },
       }));
       break;
@@ -702,6 +702,15 @@ function _handleMsg(msg) {
       if (!wid || !sid) break;
       _patchWorkspace(wid, (w) => ({
         annotationsBySession: { ...(w.annotationsBySession || {}), [sid]: msg.annotations || [] },
+      }));
+      break;
+    }
+    case "collab_prompt_items": {
+      // Full external-prompt-material list for a session (replace) — shared like annotations.
+      const wid = msg.workspace_id, sid = msg.session_id;
+      if (!wid || !sid) break;
+      _patchWorkspace(wid, (w) => ({
+        promptItemsBySession: { ...(w.promptItemsBySession || {}), [sid]: msg.items || [] },
       }));
       break;
     }
@@ -1426,6 +1435,35 @@ export function updateDraftLocal(workspaceId, sessionId, text, cursor, user) {
     drafts[sessionId] = d;
     return { drafts };
   });
+}
+
+// ── generalized agent-prompt inbox ────────────────────────────────────────────
+// A way to feed prompt material into an AgentPanel FROM THE OUTSIDE, in an abstract
+// way other features can reuse. Two sinks:
+//   1) a LIST of items (addAgentPromptItem) rendered above the prompt, each a
+//      {text, note} pair (e.g. a doc text-selection → a suggested "edit") that the
+//      user compiles into the prompt via "Include in prompt".
+//   2) DIRECT-to-prompt writes (writeAgentPrompt) straight into the shared draft.
+// Items are SHARED across windows just like annotations (server-owned per session,
+// broadcast as `collab_prompt_items`). Any source can push via these actions.
+export function addAgentPromptItem(workspaceId, sessionId, { kind = "edit", text = "", note = "" } = {}) {
+  _send({ type: "collab_prompt_item_add", workspace_id: workspaceId, session_id: sessionId, kind, text, note });
+}
+export function removeAgentPromptItem(workspaceId, sessionId, id) {
+  _send({ type: "collab_prompt_item_remove", workspace_id: workspaceId, session_id: sessionId, id });
+}
+export function clearAgentPromptItems(workspaceId, sessionId) {
+  _send({ type: "collab_prompt_item_clear", workspace_id: workspaceId, session_id: sessionId });
+}
+/** Direct sink: write (or append) text straight into a session's shared prompt draft.
+ *  The panel adopts it via its remote-draft effect (when not being actively typed in). */
+export function writeAgentPrompt(workspaceId, sessionId, text, { append = true, selfId = null } = {}) {
+  const w = _state.workspaces.find((x) => x.id === workspaceId);
+  const cur = (w?.drafts?.[sessionId]?.text || "").trim();
+  const next = append && cur ? `${cur}\n${text}` : text;
+  updateDraftLocal(workspaceId, sessionId, next, next.length, selfId);
+  sendPromptTyping(workspaceId, sessionId, next, next.length);
+  return next;
 }
 
 /** Switch a running ACP node's permission mode (ask / accept-edits / plan / …). */

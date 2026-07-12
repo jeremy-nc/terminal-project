@@ -119,6 +119,7 @@ export default function CollabDashboard({ workspace }) {
                 delegation={delegation}
                 parentIndex={parentIndex}
                 annList={w.annotationsBySession?.[sid] || EMPTY_ARR}
+                promptItems={w.promptItemsBySession?.[sid] || EMPTY_ARR}
               />
             );
           })}

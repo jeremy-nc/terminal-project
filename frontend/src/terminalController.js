@@ -678,6 +678,16 @@ function _handleMsg(msg) {
       _patchWorkspace(wid, (w) => ({ collab: { ...(w.collab || {}), active: true, agent: msg.agent, sessions: (w.collab?.sessions) || [] } }));
       break;
     }
+    case "collab_session_pending": {
+      // A launch started (click OR command-router) — show a loading skeleton for it.
+      if (msg.workspace_id && msg.temp_id) _addPendingAgent(msg.workspace_id, msg.temp_id);
+      break;
+    }
+    case "collab_pending_clear": {
+      // The launch failed to open — drop its skeleton.
+      if (msg.workspace_id && msg.temp_id) _clearPendingAgent(msg.workspace_id, msg.temp_id);
+      break;
+    }
     case "collab_session_added":
     case "collab_session_forked": {
       // A new agent session/panel opened — append its id. A `parent` marks it as a
@@ -688,6 +698,10 @@ function _handleMsg(msg) {
         const sessions = (w.collab?.sessions) || [];
         const patch = sessions.includes(msg.session_id) ? {}
           : { collab: { ...(w.collab || { active: true, sessions: [] }), sessions: [...sessions, msg.session_id] } };
+        // Drop the optimistic placeholder this real session replaces (only the asker knows temp_id).
+        if (msg.temp_id && (w.pendingAgents || []).includes(msg.temp_id)) {
+          patch.pendingAgents = (w.pendingAgents || []).filter((x) => x !== msg.temp_id);
+        }
         if (msg.parent) {
           patch.delegations = { ...(w.delegations || {}),
             [msg.session_id]: { ...(w.delegations?.[msg.session_id] || {}), parent: msg.parent } };
@@ -714,6 +728,20 @@ function _handleMsg(msg) {
       }));
       break;
     }
+    case "collab_ui_intent": {
+      // [collab-command] a targeted UI navigation intent — obey only if it's for me.
+      const wid = msg.workspace_id;
+      if (!wid || (msg.target && msg.target !== _selfPresenceId)) break;
+      _patchWorkspace(wid, () => ({ uiIntent: { ...msg, at: Date.now() } }));
+      break;
+    }
+    case "collab_command_ack": {
+      // [collab-command] status of MY in-flight command (spinner → confirmation).
+      const wid = msg.workspace_id;
+      if (!wid || (msg.target && msg.target !== _selfPresenceId)) break;
+      _patchWorkspace(wid, () => ({ commandStatus: { state: msg.state, text: msg.text || "", at: Date.now() } }));
+      break;
+    }
     case "collab_delegation": {
       // A delegated sub-agent's lifecycle: auto -> (human-gated) -> returned.
       const wid = msg.workspace_id;
@@ -728,11 +756,24 @@ function _handleMsg(msg) {
       break;
     }
     case "collab_session_removed": {
-      const wid = msg.workspace_id;
-      if (!wid || !msg.session_id) break;
-      _patchWorkspace(wid, (w) => ({
-        collab: { ...(w.collab || {}), sessions: (w.collab?.sessions || []).filter((s) => s !== msg.session_id) },
-      }));
+      const wid = msg.workspace_id, sid = msg.session_id;
+      if (!wid || !sid) break;
+      // Drop the panel AND all of its per-session state — otherwise a stale statusById
+      // ("running") or permById (a pending approval) lingers and keeps the tab/nav status
+      // dots lit after the agent is gone. Also stops a leak from per-command router churn.
+      _patchWorkspace(wid, (w) => {
+        const drop = (obj) => { if (!obj || !(sid in obj)) return obj; const n = { ...obj }; delete n[sid]; return n; };
+        return {
+          collab: { ...(w.collab || {}), sessions: (w.collab?.sessions || []).filter((s) => s !== sid) },
+          transcriptById: drop(w.transcriptById),
+          statusById: drop(w.statusById),
+          permById: drop(w.permById),
+          acpMetaById: drop(w.acpMetaById),
+          drafts: drop(w.drafts),
+          annotationsBySession: drop(w.annotationsBySession),
+          promptItemsBySession: drop(w.promptItemsBySession),
+        };
+      });
       break;
     }
     case "collab_stopped": {
@@ -1357,7 +1398,29 @@ export function runCollab(workspaceId, agent) {
 }
 /** Open a new agent session/panel on the workspace's runtime. */
 export function collabAddSession(workspaceId, kickoff) {
-  _send({ type: "collab_add_session", workspace_id: workspaceId, kickoff });
+  // Optimistic INSTANT placeholder on click; the server also echoes a collab_session_pending
+  // with the same temp id (deduped). Command-router launches get their placeholder purely
+  // from that server event — so both paths show the same loading skeleton.
+  const tempId = "pending-" + (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2));
+  _addPendingAgent(workspaceId, tempId);
+  _send({ type: "collab_add_session", workspace_id: workspaceId, kickoff, temp_id: tempId });
+}
+// A pending "starting agent…" placeholder, keyed by temp id (dedup + stale-safety timeout).
+function _addPendingAgent(workspaceId, tempId) {
+  let added = false;
+  _patchWorkspace(workspaceId, (w) => {
+    const p = w.pendingAgents || [];
+    if (p.includes(tempId)) return {};
+    added = true;
+    return { pendingAgents: [...p, tempId] };
+  });
+  if (added) setTimeout(() => _clearPendingAgent(workspaceId, tempId), 25000);
+}
+function _clearPendingAgent(workspaceId, tempId) {
+  _patchWorkspace(workspaceId, (w) => {
+    const p = w.pendingAgents || [];
+    return p.includes(tempId) ? { pendingAgents: p.filter((x) => x !== tempId) } : {};
+  });
 }
 /** Snapshot-fork a session: a new panel seeded with the source's context + seed. */
 export function collabForkSession(workspaceId, fromSessionId, seedPrompt) {
@@ -1367,6 +1430,10 @@ export function collabForkSession(workspaceId, fromSessionId, seedPrompt) {
 /** Send-to-agent: a prompt turn on one session. */
 export function collabPrompt(workspaceId, sessionId, text) {
   _send({ type: "collab_prompt", workspace_id: workspaceId, session_id: sessionId, text });
+}
+/** [collab-command] Send a natural-language command to the workspace's control agent. */
+export function sendCollabCommand(workspaceId, text) {
+  _send({ type: "collab_command", workspace_id: workspaceId, text });
 }
 /** Broadcast-only chat message on one session (not sent to the agent). */
 export function collabChat(workspaceId, sessionId, text) {

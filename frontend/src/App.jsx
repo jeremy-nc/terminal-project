@@ -120,6 +120,23 @@ export default function App() {
   const cicdRunning = useMemo(
     () => (cicd?.teamcity?.builds || []).filter(b => b.state === "running" || b.state === "queued").length,
     [cicd]);
+  // Collab tab status dot (priority: needs-input > running > session-idle), so a
+  // background Collab session — and any agent asking for approval — is discoverable
+  // even when the tab isn't focused. Mirrors the Pipeline "live" badge idea.
+  const collabState = useMemo(() => {
+    let active = false, running = false, needsInput = false;
+    for (const w of collabWorkspaces) {
+      if (!w.collab?.active) continue;
+      active = true;
+      for (const sid of (w.collab.sessions || [])) {
+        const st = w.statusById?.[sid];
+        if (st === "running") running = true;
+        if (st === "waiting") needsInput = true;
+      }
+      if (w.permById && Object.keys(w.permById).length > 0) needsInput = true;  // a pending approval/question
+    }
+    return { active, running, needsInput };
+  }, [collabWorkspaces]);
   const onWorkOnPr = (pr) => {
     const local = repos.find(r => r.name.toLowerCase() === (pr.repo || "").toLowerCase());
     if (!local) return;
@@ -150,6 +167,13 @@ export default function App() {
             onClick={() => setView("collab")}
           >
             Collab
+            {collabState.active && (
+              <span
+                className={`collab-indicator ${collabState.needsInput ? "attention" : collabState.running ? "running" : "idle"}`}
+                title={collabState.needsInput ? "An agent needs your input"
+                  : collabState.running ? "An agent is running" : "Session running"}
+              />
+            )}
           </button>
           <button
             className={`toggle-btn ${view === "pipeline" ? "active" : ""}`}

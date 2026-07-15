@@ -237,6 +237,22 @@ html, body { background: var(--bg); }
   70%  { box-shadow: 0 0 0 5px rgba(76, 175, 114, 0); }
   100% { box-shadow: 0 0 0 0 rgba(76, 175, 114, 0); }
 }
+
+/* Collab tab status dot: idle (session up) · running (agent working) · attention
+   (an agent needs input). Same run-pulse idea as the Pipeline "live" badge. */
+.collab-indicator { display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+  margin-left: 7px; vertical-align: middle; }
+.collab-indicator.idle { background: var(--text-faint); }
+.toggle-btn.active .collab-indicator.idle { background: rgba(255, 255, 255, 0.65); }
+.collab-indicator.running { background: #6ee29a; box-shadow: 0 0 0 0 rgba(76, 175, 114, 0.5);
+  animation: run-pulse 1.8s ease-out infinite; }
+.collab-indicator.attention { background: var(--warn); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0.6);
+  animation: attn-pulse 1s ease-out infinite; }
+@keyframes attn-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(234, 179, 8, 0.55); }
+  70%  { box-shadow: 0 0 0 5px rgba(234, 179, 8, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(234, 179, 8, 0); }
+}
 .toolbar .title {
   font-weight: 600;
   font-size: 13px;
@@ -341,8 +357,53 @@ html, body { background: var(--bg); }
 }
 .collab-run:hover, .collab-add:hover { background: var(--accent-hover); }
 
-.collab-panels { position: relative; flex: 1; min-width: 0; display: flex; gap: 12px; padding: 12px; overflow-x: auto; }
+/* Non-scrolling region wrapper: anchors the editor overlay + command puck so they
+   cover the VISIBLE panels area even when .collab-panels scrolls horizontally. */
+.collab-panels-wrap { position: relative; flex: 1; min-width: 0; min-height: 0; display: flex; overflow: hidden; }
+.collab-panels { flex: 1; min-width: 0; display: flex; gap: 12px; padding: 12px; overflow-x: auto; }
 .collab-panels .ws-empty { flex: 1; }
+
+/* [collab-command] floating command control (puck ↔ pill), absolute within the panels. */
+.collab-cmd { position: absolute; z-index: 50; user-select: none; }
+.collab-cmd.puck { width: 46px; height: 46px; border-radius: 50%; cursor: grab;
+  background: var(--surface-2); border: 2px solid var(--accent); box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+  display: flex; align-items: center; justify-content: center; transition: transform var(--dur) var(--ease); }
+.collab-cmd.puck:hover { transform: scale(1.06); }
+.collab-cmd.puck:active { cursor: grabbing; }
+.collab-cmd-dot { width: 16px; height: 16px; border-radius: 50%; background: var(--accent); }
+.collab-cmd.open { display: flex; flex-direction: column; gap: 6px; width: min(460px, 60%); }
+.collab-cmd-pill { display: flex; align-items: center; gap: 6px; padding: 6px 6px 6px 16px; cursor: move;
+  background: var(--surface-2); border: 1.5px solid var(--accent); border-radius: 999px; box-shadow: 0 6px 22px rgba(0,0,0,0.45); }
+.collab-cmd-input { flex: 1; background: transparent; border: none; outline: none; color: var(--text); cursor: text;
+  font-size: 14px; font-family: var(--sans); padding: 6px 0; }
+.collab-cmd-input::placeholder { color: var(--text-faint); }
+.collab-cmd-send { width: 34px; height: 34px; border-radius: 50%; border: none; flex: none; cursor: pointer;
+  background: var(--accent); color: #fff; font-size: 17px; display: flex; align-items: center; justify-content: center; }
+.collab-cmd-send:hover { background: var(--accent-hover); }
+.collab-cmd-senddot { width: 9px; height: 9px; border-radius: 50%; background: #fff; }
+.collab-cmd-status { align-self: flex-start; margin-left: 16px; font-size: 12px; color: var(--text-muted);
+  display: flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--border);
+  border-radius: 6px; padding: 3px 9px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.collab-cmd-status.error { color: var(--danger); }
+.collab-cmd-status.done { color: var(--accent); }
+.collab-cmd-spin { width: 11px; height: 11px; flex: none; border-radius: 50%; border: 2px solid var(--border-strong);
+  border-top-color: var(--accent); animation: collab-cmd-spin 0.7s linear infinite; }
+@keyframes collab-cmd-spin { to { transform: rotate(360deg); } }
+.collab-flash { animation: collab-flash 1.2s var(--ease); }
+@keyframes collab-flash { 0%, 100% { box-shadow: 0 0 0 0 transparent; } 25% { box-shadow: 0 0 0 3px var(--accent); } }
+
+/* [collab-command] ambient "alive" pulse (like a running pipeline agent) — a breathing
+   accent ring via ::after so it doesn't fight each element's own drop shadow. */
+.collab-cmd.puck::after {
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  animation: collab-cmd-pulse 1.8s var(--ease) infinite;
+}
+@keyframes collab-cmd-pulse {
+  0%, 100% { box-shadow: 0 0 6px 0 color-mix(in srgb, var(--accent) 38%, transparent),
+                         0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+  50%      { box-shadow: 0 0 18px 3px color-mix(in srgb, var(--accent) 58%, transparent),
+                         0 0 0 5px color-mix(in srgb, var(--accent) 16%, transparent); }
+}
 
 /* Markdown editor: overlays ONLY the panels region (anchored to .collab-panels). */
 .md-editor-overlay { position: absolute; inset: 0; z-index: 40; display: flex; flex-direction: column; background: var(--surface); }
@@ -438,6 +499,17 @@ html, body { background: var(--bg); }
 .collab-panel-btn { font-size: 12px; width: 24px; padding: 3px 0; border-radius: 4px; border: 1px solid var(--border-strong); background: var(--surface-hover); color: var(--text-muted); cursor: pointer; }
 .collab-panel-btn:hover { color: var(--text); background: var(--surface); }
 .collab-panel-btn.close:hover { color: var(--danger); }
+
+/* Optimistic "starting agent…" placeholder panel (shown on + Add Agent until ready). */
+.collab-panel.skeleton { border-style: dashed; opacity: 0.9; }
+.collab-panel.skeleton .sk-spin { width: 12px; height: 12px; flex: none; border-radius: 50%;
+  border: 2px solid var(--border-strong); border-top-color: var(--accent); animation: collab-cmd-spin 0.7s linear infinite; }
+.collab-skel-msg { height: 44px; border-radius: 6px; margin-top: 8px; background: var(--surface-2); animation: sk-pulse 1.3s ease-in-out infinite; }
+.collab-skel-input { height: 72px; border-radius: 6px; background: var(--surface-2); animation: sk-pulse 1.3s ease-in-out infinite; }
+.collab-skel-row { height: 28px; border-radius: 5px; background: var(--surface-2); animation: sk-pulse 1.3s ease-in-out infinite; }
+.collab-skel-btn { width: 24px; height: 24px; flex: none; border-radius: 4px; background: var(--surface-2); animation: sk-pulse 1.3s ease-in-out infinite; }
+.collab-panel.skeleton .sk-bar { height: 10px; border-radius: 5px; background: var(--surface-2); animation: sk-pulse 1.3s ease-in-out infinite; }
+@keyframes sk-pulse { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; } }
 
 /* The shared AgentPanel embedded in the Markdown editor fills the agent pane
    (drops the standalone panel's fixed width / border / radius). */
@@ -618,6 +690,13 @@ textarea.collab-input.agent { flex: 1; resize: vertical; min-height: 54px; line-
 .ws-dot.status-waiting { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
 .ws-dot.status-finished { background: var(--success); }
 .ws-dot.status-error { background: var(--danger); }
+/* Per-workspace Collab tab dot: session up (dim) · agent running (green pulse) ·
+   needs input (amber urgent pulse). Mirrors the top-nav Collab indicator. */
+.ws-dot.collab.idle { background: var(--text-faint); }
+.ws-dot.collab.running { background: #6ee29a; box-shadow: 0 0 0 0 rgba(76, 175, 114, 0.5);
+  animation: run-pulse 1.8s ease-out infinite; }
+.ws-dot.collab.attention { background: var(--warn); box-shadow: 0 0 0 0 rgba(234, 179, 8, 0.6);
+  animation: attn-pulse 1s ease-out infinite; }
 .ws-tab-title { pointer-events: none; }
 .ws-close {
   background: none; border: none; color: var(--text-faint);
@@ -2428,5 +2507,7 @@ textarea.collab-input.agent { flex: 1; resize: vertical; min-height: 54px; line-
   padding: 7px 10px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm);
   background: var(--surface); color: var(--text); cursor: pointer; transition: background var(--dur) var(--ease); }
 .acp-q-opt:hover { background: var(--surface-hover); border-color: var(--accent); }
+.acp-q-opt.on { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 16%, var(--surface)); }
+.acp-q-opt.on .acp-q-opt-label::before { content: "✓ "; color: var(--accent); }
 .acp-q-opt-label { font-size: 12.5px; font-weight: 600; }
 .acp-q-opt-desc { font-size: 11px; color: var(--text-muted); line-height: 1.35; }

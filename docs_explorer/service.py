@@ -104,7 +104,10 @@ class DocsService:
         """What to actually hand watchdog: the docs dir itself (recursive) when it
         exists, else its parent (non-recursive) so we notice it being created.
         Returns (target_path, recursive)."""
-        rp = os.path.expanduser(d)
+        # Canonicalise (realpath) so different spellings of the SAME dir (e.g. ~/x vs
+        # /Users/.../x, a trailing slash, or a symlink) resolve to ONE watchdog watch.
+        # Otherwise they share a watch and unscheduling one tears down the other's events.
+        rp = os.path.realpath(os.path.expanduser(d))
         return (rp, True) if os.path.isdir(rp) else (os.path.dirname(rp), False)
 
     def _watch(self, d):
@@ -127,10 +130,17 @@ class DocsService:
     def _unwatch(self, d):
         info = self._watches.pop(d, None)
         if info and info["watch"] and self._observer:
-            try:
-                self._observer.unschedule(info["watch"])
-            except Exception:
-                pass
+            # Other watched dirs may resolve to the SAME target and share this watchdog
+            # watch (e.g. the editor opened an absolute path while the DocsExplorer watches
+            # the tilde form). Only unschedule when we're the LAST — else the sibling's
+            # events would stop too. A now-stale handler is harmless: _on_change/_refresh
+            # guard on `d in self._watches`.
+            shared = any(o.get("target") == info["target"] for o in self._watches.values())
+            if not shared:
+                try:
+                    self._observer.unschedule(info["watch"])
+                except Exception:
+                    pass
         t = self._timers.pop(d, None)
         if t:
             t.cancel()

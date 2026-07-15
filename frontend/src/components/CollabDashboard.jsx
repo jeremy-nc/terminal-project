@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import DocsExplorer from "./DocsExplorer.jsx";
 import MarkdownEditor from "./MarkdownEditor.jsx";
+import CollabCommandPuck from "./CollabCommandPuck.jsx";  // [collab-command]
 import {
   getSelfPresenceId,
   runCollab, collabAddSession, stopCollab, sendAnnotationSelect,
@@ -16,6 +17,35 @@ import {
  */
 
 const AGENTS = ["stub", "claude-code", "claude-sdk", "gemini", "hermes"];
+
+/** Placeholder shown the instant "+ Add Agent" is clicked — the panel's frame with a
+ *  spinner + shimmer — so the UI feels snappy while the agent subprocess spins up. It's
+ *  swapped for the real AgentPanel when collab_session_added echoes back its temp id. */
+function AgentPanelSkeleton() {
+  return (
+    <div className="collab-panel skeleton" aria-hidden="true">
+      <div className="collab-panel-head">
+        <span className="collab-panel-title">Agent</span>
+        <span className="sk-spin" />
+        {/* button-sized placeholders so the header height matches the real one (Fork/⏹/×) */}
+        <span className="collab-skel-btn" style={{ marginLeft: "auto" }} />
+        <span className="collab-skel-btn" />
+        <span className="collab-skel-btn" />
+      </div>
+      <div className="collab-feed">
+        <div className="text-faint">Starting agent…</div>
+        <div className="collab-skel-msg" />
+      </div>
+      {/* Mirror the real panel's input area (model/mode row · prompt · chat) so swapping
+          in the loaded AgentPanel doesn't resize the feed / jolt the layout. */}
+      <div className="collab-inputs">
+        <div className="collab-skel-row" style={{ width: 150 }} />
+        <div className="collab-skel-input" />
+        <div className="collab-skel-row" />
+      </div>
+    </div>
+  );
+}
 
 
 export default function CollabDashboard({ workspace }) {
@@ -66,6 +96,29 @@ export default function CollabDashboard({ workspace }) {
     };
   }, [w.id]);
 
+  // [collab-command] apply a UI navigation intent from the control agent (targeted to
+  // me): open a file in the editor, or scroll an agent panel into view + flash it.
+  const lastIntent = useRef(0);
+  useEffect(() => {
+    const ui = w.uiIntent;
+    if (!ui || ui.at === lastIntent.current) return;
+    lastIntent.current = ui.at;
+    if (ui.action === "open_editor" && ui.path) {
+      setEditingFile(ui.path);
+    } else if (ui.action === "focus_agent" && ui.session_id) {
+      const el = document.querySelector(`[data-session-id="${ui.session_id}"]`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", inline: "center", block: "nearest" });
+        el.classList.add("collab-flash");
+        setTimeout(() => el.classList.remove("collab-flash"), 1200);
+        // Put the caret in that panel's prompt so you can start typing to it right away
+        // (preventScroll so it doesn't fight the smooth scroll above).
+        const input = el.querySelector("textarea.collab-input.agent");
+        if (input) input.focus({ preventScroll: true });
+      }
+    }
+  }, [w.uiIntent?.at]);  // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div className="collab-dash">
       <div className="collab-body">
@@ -95,9 +148,10 @@ export default function CollabDashboard({ workspace }) {
           </div>
         </aside>
 
+        <div className="collab-panels-wrap">
         <div className="collab-panels">
           {!collab.active && <div className="ws-empty">Choose an agent and Run Session to begin.</div>}
-          {collab.active && collab.sessions.length === 0 && (
+          {collab.active && collab.sessions.length === 0 && (w.pendingAgents || []).length === 0 && (
             <div className="ws-empty">Add an agent to open a session.</div>
           )}
           {collab.sessions.map((sid, i) => {
@@ -123,9 +177,14 @@ export default function CollabDashboard({ workspace }) {
               />
             );
           })}
-          {/* Markdown editor overlays ONLY the panels region (not the sidebar/tabs). */}
+          {(w.pendingAgents || []).map((tid) => <AgentPanelSkeleton key={tid} />)}
+        </div>
+          {/* Editor + puck anchor to the NON-scrolling wrap, so they cover the whole
+              visible region even when the panels scroll horizontally underneath. */}
           {editingFile && <MarkdownEditor path={editingFile} workspaceId={w.id}
                                           collabActive={collab.active} onClose={() => setEditingFile(null)} />}
+          {/* [collab-command] floating NL command control — only while a session runs. */}
+          {collab.active && <CollabCommandPuck workspaceId={w.id} commandStatus={w.commandStatus} />}
         </div>
       </div>
     </div>

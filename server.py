@@ -600,7 +600,7 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
     if mtype == "collab_add_session":
         run = _workspace_run(sub, msg.get("workspace_id"))
         if isinstance(run, CollabRun):
-            asyncio.create_task(run.add_session(kickoff=msg.get("kickoff")))
+            asyncio.create_task(run.add_session(kickoff=msg.get("kickoff"), temp_id=msg.get("temp_id")))
         return
 
     if mtype == "collab_fork_session":
@@ -674,6 +674,13 @@ def handle_msg(sub: Subscriber, msg: dict) -> None:
         run = _workspace_run(sub, msg.get("workspace_id"))
         if isinstance(run, CollabRun):
             run.clear_prompt_items(msg.get("session_id"))
+        return
+
+    if mtype == "collab_command":
+        # [collab-command] route a natural-language command to the workspace's control agent
+        run = _workspace_run(sub, msg.get("workspace_id"))
+        if isinstance(run, CollabRun):
+            asyncio.create_task(run.control_command(msg.get("text", ""), getattr(sub, "presence_id", None)))
         return
 
     if mtype == "collab_explore_selection":

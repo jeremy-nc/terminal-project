@@ -45,7 +45,7 @@ export function acquireDoc(workspaceId, file, { selfId, seedText = "" } = {}) {
   const yann = ydoc.getArray("annotations");
   const awareness = new Awareness(ydoc);
   e = { workspaceId, file, ydoc, ytext, yann, awareness, refs: 1, updateCount: 0,
-        seedText, selfId, changeSubs: new Set(), announceTimer: null, knownClients: new Set() };
+        seedText, selfId, hydrated: false, changeSubs: new Set(), announceTimer: null, knownClients: new Set() };
   docs.set(file, e);
 
   ydoc.on("update", (update, origin) => {
@@ -92,12 +92,18 @@ export function applyDocSync(file, existed, updates) {
   const e = docs.get(file);
   if (!e) return;
   for (const u of updates || []) Y.applyUpdate(e.ydoc, b64ToU8(u), "remote");
-  // The very first opener (nobody had this doc) seeds it from disk exactly once.
-  if (!existed && (!updates || updates.length === 0) && e.ytext.length === 0 && e.seedText) {
+  // Seed from disk if, AFTER applying the server's log, the doc is still empty and we
+  // have disk content. Covers the first opener AND a lost/empty log — which would
+  // otherwise leave an empty doc that a save could write back, TRUNCATING the file.
+  if (e.ytext.length === 0 && e.seedText) {
     e.ydoc.transact(() => e.ytext.insert(0, e.seedText), "seed");
   }
   e.seedText = "";
+  e.hydrated = true;   // the doc_join reply landed — safe to persist from now on
 }
+/** True once the doc_join reply has been applied (or the seed ran) — i.e. docText
+ *  reflects real content, not the transient empty state right after acquireDoc. */
+export function isDocHydrated(file) { const e = docs.get(file); return !!(e && e.hydrated); }
 export function applyDocUpdate(file, updateB64) {
   const e = docs.get(file);
   if (e) Y.applyUpdate(e.ydoc, b64ToU8(updateB64), "remote");

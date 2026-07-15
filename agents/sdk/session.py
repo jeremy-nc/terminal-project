@@ -106,17 +106,42 @@ def _tool_title(name: str, inp: dict) -> str:
 
 
 def _parse_ask_answer(choice: str, questions: list):
-    """Map a picked AskUserQuestion option id ('q{qi}o{oi}') back to (header, label)."""
-    m = re.fullmatch(r"q(\d+)o(\d+)", choice or "")
-    if not m:
-        return []
-    qi, oi = int(m.group(1)), int(m.group(2))
-    if 0 <= qi < len(questions):
+    """Map an AskUserQuestion reply to a list of (header, answer) pairs. The reply is
+    either a JSON map of per-question selected option indices ({"0":[1],"1":[0,2]} —
+    supports multiple questions AND multi-select) or the legacy single 'q{qi}o{oi}'."""
+    choice = (choice or "").strip()
+
+    def _one(qi, idxs):
+        if not (0 <= qi < len(questions)):
+            return None
         q = questions[qi] or {}
         opts = q.get("options") or []
-        if 0 <= oi < len(opts):
-            return [(q.get("header") or q.get("question") or "Answer", (opts[oi] or {}).get("label") or "")]
-    return []
+        labels = [(opts[i] or {}).get("label") or "" for i in idxs if isinstance(i, int) and 0 <= i < len(opts)]
+        labels = [x for x in labels if x]
+        if not labels:
+            return None
+        return (q.get("header") or q.get("question") or "Answer", ", ".join(labels))
+
+    if choice.startswith("{"):
+        try:
+            sel = json.loads(choice)
+        except Exception:  # noqa: BLE001
+            return []
+        out = []
+        for qi_str, idxs in (sel or {}).items():
+            try:
+                pair = _one(int(qi_str), idxs if isinstance(idxs, list) else [idxs])
+            except (TypeError, ValueError):
+                pair = None
+            if pair:
+                out.append(pair)
+        return out
+
+    m = re.fullmatch(r"q(\d+)o(\d+)", choice)
+    if not m:
+        return []
+    pair = _one(int(m.group(1)), [int(m.group(2))])
+    return [pair] if pair else []
 
 
 def make_delegate_server(on_delegate):
@@ -176,7 +201,8 @@ _TASK_KIND = {"TaskStartedMessage": "started", "TaskUpdatedMessage": "updated",
 class SdkSession:
     def __init__(self, cwd, *, key=None, key_field="session_id", emit=None, perms=None,
                  permission="auto", on_narrate=None, agent=None, transcript=None, model=None,
-                 mcp_servers=None, disallowed_tools=None, on_subagent=None, mode=None):
+                 mcp_servers=None, disallowed_tools=None, on_subagent=None, mode=None,
+                 setting_sources=None, system_prompt=None, thinking=None):
         self.cwd = os.path.abspath(os.path.expanduser(cwd)) if cwd else cwd
         self._key = key
         self._key_field = key_field
@@ -189,6 +215,14 @@ class SdkSession:
         self._on_narrate = on_narrate
         self._mcp_servers = mcp_servers or {}       # extra in-process tools (e.g. delegate)
         self._disallowed_tools = disallowed_tools or []
+        # None → default ["project","user"] (load CLAUDE.md + configured MCP servers). Pass
+        # [] for a lean session that skips settings/MCP (e.g. the command router).
+        self._setting_sources = setting_sources
+        # None → default (claude_code preset system prompt + adaptive thinking). A lean
+        # router passes a tiny custom system_prompt and thinking={"type":"disabled"} to cut
+        # per-turn latency (no giant preset to process, no thinking overhead).
+        self._system_prompt = system_prompt
+        self._thinking = thinking
         # A stable id we control (used for event keying regardless of the SDK's
         # internal session id, which is only assigned on the first turn).
         self.session_id = str(uuid.uuid4())
@@ -229,13 +263,14 @@ class SdkSession:
         if _sdk is None:
             raise RuntimeError("claude-agent-sdk is not installed (requires Python >= 3.10)")
         opts = _sdk.ClaudeAgentOptions(
-            system_prompt={"type": "preset", "preset": "claude_code"},
-            setting_sources=["project", "user"],  # load CLAUDE.md / .claude agents & commands
+            system_prompt=(self._system_prompt if self._system_prompt is not None
+                           else {"type": "preset", "preset": "claude_code"}),
+            setting_sources=(self._setting_sources if self._setting_sources is not None else ["project", "user"]),
             permission_mode=self._mode,
             include_partial_messages=True,         # stream thinking/text/tool-input deltas
             model=self._model,
             cwd=self.cwd,
-            thinking={"type": "adaptive", "display": "summarized"},
+            thinking=(self._thinking if self._thinking is not None else {"type": "adaptive", "display": "summarized"}),
             can_use_tool=self._can_use_tool if self.permission == "ask" else None,
             resume=resume,
             fork_session=fork,
@@ -282,6 +317,17 @@ class SdkSession:
         async for msg in self._client.receive_response():
             stop = self._translate(msg) or stop
         return stop
+
+    async def warmup(self) -> None:
+        """Prime the connection past the one-time first-turn penalty (the subscription
+        rate-limit check etc.) WITHOUT emitting anything, so the next real turn is faster.
+        Used to warm a pre-fetched command-router session in the background."""
+        try:
+            await self._client.query("Respond with the single word: ready")
+            async for _ in self._client.receive_response():
+                pass
+        except Exception:  # noqa: BLE001 — best-effort; a failed warmup just means no speedup
+            pass
 
     async def set_mode(self, mode_id) -> None:
         self._mode = mode_id
@@ -437,6 +483,9 @@ class SdkSession:
         # coordination primitives, not side-effecting actions, and the sub-panes they
         # spawn have their own approvals.
         if tool_name and "__delegate" in str(tool_name):
+            return _sdk.PermissionResultAllow()
+        # [collab-command] the control agent's own tools are safe coordination primitives
+        if tool_name and "collab_control" in str(tool_name):
             return _sdk.PermissionResultAllow()
         if self._perms is None:
             return _sdk.PermissionResultDeny(message="no approver available")

@@ -314,6 +314,53 @@ const DELEGATION_LABEL = {
 const EMPTY_DRAFT = { text: "", cursors: {} };  // stable ref so memo holds when no draft
 const EMPTY_FEATURES = {};  // stable ref so memo holds when features aren't passed (all on)
 
+/** An agent's AskUserQuestion, rendered interactively. Collects a selection PER
+ *  question (radio for single-select, multi-toggle when `multiSelect`), then submits
+ *  them all at once — so multi-question asks are fully answerable (the old flow resolved
+ *  on the first click). `onAnswer` sends the reply id: a JSON map of per-question option
+ *  indices, or "__dismiss". */
+function AskQuestionCard({ perm, onAnswer }) {
+  const questions = perm.questions || [];
+  const [sel, setSel] = useState({});   // qi -> [selected option indices]
+  const toggle = (qi, oi, multi) => setSel((s) => {
+    const cur = s[qi] || [];
+    if (multi) return { ...s, [qi]: cur.includes(oi) ? cur.filter((x) => x !== oi) : [...cur, oi] };
+    return { ...s, [qi]: [oi] };
+  });
+  const answeredCount = questions.filter((_, qi) => (sel[qi] || []).length > 0).length;
+  const allAnswered = answeredCount === questions.length;
+  return (
+    <div className="acp-perm acp-question">
+      <div className="acp-question-head">❓ {perm.title}</div>
+      {questions.map((q, qi) => (
+        <div key={qi} className="acp-q">
+          {q.header && <div className="acp-q-tag">{q.header}{q.multiSelect ? " · choose any" : ""}</div>}
+          {q.question && <div className="acp-q-text">{q.question}</div>}
+          <div className="acp-q-opts">
+            {(q.options || []).map((o, oi) => {
+              const on = (sel[qi] || []).includes(oi);
+              return (
+                <button key={oi} className={`acp-q-opt${on ? " on" : ""}`}
+                        onClick={() => toggle(qi, oi, !!q.multiSelect)}>
+                  <span className="acp-q-opt-label">{o.label}</span>
+                  {o.description && <span className="acp-q-opt-desc">{o.description}</span>}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ))}
+      <div className="acp-perm-actions">
+        <button className="acp-perm-btn kind-allow_once" disabled={!allAnswered}
+                onClick={() => onAnswer(JSON.stringify(sel))}>
+          Submit{questions.length > 1 ? ` (${answeredCount}/${questions.length})` : ""}
+        </button>
+        <button className="acp-perm-btn kind-reject_once" onClick={() => onAnswer("__dismiss")}>Dismiss</button>
+      </div>
+    </div>
+  );
+}
+
 // Memoised: each panel gets only ITS OWN per-session slices (draft/transcript/…),
 // so a change to one session (e.g. the ~90ms prompt-draft sync while typing) only
 // re-renders that panel — not every panel's feed/overlays.
@@ -525,7 +572,8 @@ export const AgentPanel = React.memo(function AgentPanel({ workspaceId, sessionI
 
   const dStatus = delegation?.status;
   return (
-    <div className={`collab-panel${delegation ? " delegated" : ""}${dStatus === "human-gated" ? " gated" : ""}${dStatus === "watching" ? " watching" : ""}${className ? " " + className : ""}`}>
+    <div data-session-id={sessionId} /* [collab-command] focus target */
+         className={`collab-panel${delegation ? " delegated" : ""}${dStatus === "human-gated" ? " gated" : ""}${dStatus === "watching" ? " watching" : ""}${className ? " " + className : ""}`}>
       {showHeader && (
       <div className="collab-panel-head">
         <span className="collab-panel-title">Agent {index + 1}</span>
@@ -562,30 +610,7 @@ export const AgentPanel = React.memo(function AgentPanel({ workspaceId, sessionI
         {entries.length === 0 && <div className="text-faint">{emptyHint || "No messages yet."}</div>}
         {entries.map((e) => <Bubble key={e.seq} e={e} selfId={selfId} workspaceId={workspaceId} sessionId={sessionId} annEnabled={showAnnotations} />)}
         {perm && perm.questions ? (
-          <div className="acp-perm acp-question">
-            <div className="acp-question-head">❓ {perm.title}</div>
-            {perm.questions.map((q, qi) => (
-              <div key={qi} className="acp-q">
-                {q.header && <div className="acp-q-tag">{q.header}</div>}
-                {q.question && <div className="acp-q-text">{q.question}</div>}
-                <div className="acp-q-opts">
-                  {(q.options || []).map((o, oi) => (
-                    <button key={oi} className="acp-q-opt"
-                            onClick={() => replyAcpPermission(workspaceId, sessionId, perm.requestId, `q${qi}o${oi}`)}>
-                      <span className="acp-q-opt-label">{o.label}</span>
-                      {o.description && <span className="acp-q-opt-desc">{o.description}</span>}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            ))}
-            <div className="acp-perm-actions">
-              {(perm.options || []).map((o) => (
-                <button key={o.id} className={`acp-perm-btn kind-${o.kind || "reject"}`}
-                        onClick={() => replyAcpPermission(workspaceId, sessionId, perm.requestId, o.id)}>{o.name}</button>
-              ))}
-            </div>
-          </div>
+          <AskQuestionCard perm={perm} onAnswer={(payload) => replyAcpPermission(workspaceId, sessionId, perm.requestId, payload)} />
         ) : perm && (
           <div className="acp-perm">
             <div className="acp-perm-head">⚠ {perm.title}</div>

@@ -3,6 +3,22 @@ import { createWorkspace, selectWorkspace, clearCloseBlocked, openNewWorkspace, 
 import NewWorkspaceModal from "./NewWorkspaceModal.jsx";
 import CloseWorkspaceModal from "./CloseWorkspaceModal.jsx";
 
+/** Per-workspace collab agent status for a tab dot: null (no session) · "idle"
+ *  (session up) · "running" (an agent is working) · "attention" (an agent needs
+ *  input — a pending approval/AskUserQuestion, or a waiting turn). */
+function collabDot(w) {
+  if (!w.collab?.active) return null;
+  let running = false, needsInput = false;
+  for (const sid of (w.collab.sessions || [])) {
+    const st = w.statusById?.[sid];
+    if (st === "running") running = true;
+    if (st === "waiting") needsInput = true;
+  }
+  if (w.permById && Object.keys(w.permById).length > 0) needsInput = true;
+  return needsInput ? "attention" : running ? "running" : "idle";
+}
+const COLLAB_DOT_TITLE = { idle: "Session running", running: "An agent is running", attention: "An agent needs your input" };
+
 /** Tabs for workspaces. Each runs a pipeline independently/concurrently; selecting
  *  one shows its dashboard. "+" opens the create modal; × opens the close dialog.
  *  Tabs render in the decoupled `order` (drag a tab to reorder; persisted server-
@@ -79,7 +95,10 @@ export default function WorkspaceTabBar({ workspaces, order = [], activeWorkspac
         >
           {w.closing
             ? <span className="ws-spinner" title="closing…"></span>
-            : <span className={`ws-dot status-${w.status || "idle"}`}></span>}
+            : surface === "collab"
+              ? (() => { const c = collabDot(w);
+                  return <span className={`ws-dot collab${c ? " " + c : ""}`} title={c ? COLLAB_DOT_TITLE[c] : "No session"}></span>; })()
+              : <span className={`ws-dot status-${w.status || "idle"}`}></span>}
           {w.kind === "worktree" && <span className="ws-kind-badge" title="git worktree">⌥</span>}
           <span className="ws-tab-title">{w.name}</span>
           {w.closing

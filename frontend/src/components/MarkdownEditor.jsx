@@ -9,7 +9,7 @@ import {
   openEditorAgent, editorAgentPrompt, watchDocs, unwatchDocs, addAgentPromptItem,
 } from "../terminalController.js";
 import {
-  acquireDoc, releaseDoc, getDocText, onDocChange, mergeExternalText,
+  acquireDoc, releaseDoc, getDocText, onDocChange, mergeExternalText, isDocHydrated,
   getDocAnnotations, addDocAnnotation, updateDocAnnotation, removeDocAnnotation,
 } from "../collabDoc.js";
 import { AgentPanel, AnnotationModal } from "./AgentPanel.jsx";
@@ -208,13 +208,24 @@ export default function MarkdownEditor({ path, workspaceId, collabActive, onClos
     prevStatus.current = agentStatus;
   }, [agentStatus, path, collab]);
 
+  // Guard EVERY disk write against corruption: never persist before the collaborative
+  // doc has hydrated (its content is transiently "" right after open, until the doc_join
+  // reply lands), and never let an empty doc overwrite a file that was loaded non-empty
+  // (a desync/unseeded state). `content` in collab stays = the originally-loaded disk
+  // text, so it's the right "was there content?" baseline.
+  const canPersist = (txt) => {
+    if (collab && !isDocHydrated(path)) return false;
+    if (txt === "" && (content ?? "") !== "") return false;
+    return true;
+  };
+
   // Debounced autosave of the collaborative doc to disk (durability + so the agent's
   // cwd sees current text between turns).
   useEffect(() => {
     if (!collab) return undefined;
-    const t = setTimeout(() => { writeFile(path, docText).catch(() => {}); }, 1500);
+    const t = setTimeout(() => { if (canPersist(docText)) writeFile(path, docText).catch(() => {}); }, 1500);
     return () => clearTimeout(t);
-  }, [collab, path, docText]);
+  }, [collab, path, docText, content]);  // eslint-disable-line react-hooks/exhaustive-deps
 
   // When the source becomes visible again, tell CodeMirror to re-measure (it was
   // display:none, i.e. zero-sized, so its layout is stale until we ask).
@@ -225,6 +236,7 @@ export default function MarkdownEditor({ path, workspaceId, collabActive, onClos
   }, [viewMode]);
 
   const save = async () => {
+    if (!canPersist(textRef.current)) { setError("Not saved — document is still syncing."); return; }
     setSaving(true); setError(null);
     try { await writeFile(path, textRef.current); setDirty(false); }
     catch (e) { setError(String(e.message || e)); }
@@ -232,7 +244,9 @@ export default function MarkdownEditor({ path, workspaceId, collabActive, onClos
   };
   const onAgentSend = async (t) => {
     sentPrompt.current = true;
-    try { await writeFile(path, textRef.current); setDirty(false); } catch (_) { /* keep going */ }
+    // Only push the buffer to disk if it's safe; otherwise leave the last-good file for
+    // the agent to read (don't hand it an empty/unsynced doc).
+    if (canPersist(textRef.current)) { try { await writeFile(path, textRef.current); setDirty(false); } catch (_) { /* keep going */ } }
     if (agentSid) editorAgentPrompt(workspaceId, agentSid, t);
   };
   const close = () => { if (dirty && !window.confirm("Discard unsaved changes?")) return; onClose(); };

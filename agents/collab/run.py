@@ -60,6 +60,11 @@ class CollabRun:
         self._editor_by_file = {}     # realpath(file) -> session_id, so an editor agent is SHARED per file
         self._doc_logs = {}           # file -> [b64 Yjs update] replay log for collaborative doc editing
         self._doc_seen = set()        # files that have an active Y.Doc (so the FIRST joiner seeds from disk)
+        self._command = None          # [collab-command] the CURRENTLY-running router session id
+        self._command_ready = None    # [collab-command] a pre-warmed FRESH router session for the NEXT command
+        self._command_sids = set()    # [collab-command] all router session ids (fresh per command; hidden from list_agents)
+        self._command_issuer = None   # [collab-command] presence id of the in-flight command
+        self._command_warming = False # [collab-command] guard against a double pre-warm
 
     # ── broadcast contract (mirrors PipelineRun.send) ─────────────────────────
     def send(self, event: dict) -> None:
@@ -129,7 +134,7 @@ class CollabRun:
         return self._client
 
     async def add_session(self, kickoff: str = None, fork_ref: str = None,
-                          parent: str = None, depth: int = 0):
+                          parent: str = None, depth: int = 0, temp_id: str = None):
         """Open a new session/panel — an in-process SdkSession for an SDK agent, or
         an AcpSession on the shared agent client for an ACP agent. Both expose the
         same interface and emit the same events; the panel can't tell which.
@@ -139,6 +144,11 @@ class CollabRun:
         ``parent``/``depth`` mark a delegated sub-agent pane (spawned by another
         session's ``delegate`` tool); SDK sessions below the nesting cap get their
         own ``delegate`` tool (and never the opaque built-in ``Task``)."""
+        # Announce the launch BEFORE the (slow) subprocess open so every window shows a
+        # loading placeholder immediately — whether the launch came from the "+ Add Agent"
+        # click OR the command router's launch_agent tool. Matched to the real panel by temp_id.
+        temp_id = temp_id or secrets.token_hex(4)
+        self.send({"type": "collab_session_pending", "temp_id": temp_id, "agent": self.agent, "parent": parent})
         sess = None
         try:
             if self.agent in SDK_AGENTS:
@@ -170,12 +180,13 @@ class CollabRun:
             if parent is not None:
                 self._parent[sid] = parent
             self.send({"type": "collab_session_added", "session_id": sid, "agent": self.agent,
-                       "parent": parent})
+                       "parent": parent, "temp_id": temp_id})
             if kickoff:
                 await self.prompt(sid, kickoff, sender=None)
             return sid
         except Exception as exc:  # noqa: BLE001 — surface spawn/session failures
             self.send({"type": "collab_error", "message": str(exc)})
+            self.send({"type": "collab_pending_clear", "temp_id": temp_id})  # drop the loading placeholder
             if sess is not None:  # a half-opened session leaks its subprocess — close it
                 try:
                     await sess.close()
@@ -496,6 +507,90 @@ class CollabRun:
         so closing one user's modal must not tear it down for others. It lives until the
         Collab session stops (``close()`` closes every session, editor agents included)."""
         return None
+
+    # ── [collab-command] natural-language control plane (removable) ────────────
+    def _broadcast_ephemeral(self, event: dict) -> None:
+        """Broadcast WITHOUT logging to event_log — UI intents/acks are transient, so
+        replaying them to a late-joining window would misfire."""
+        self._transport.send({**event, "workspace_id": self.workspace_id})
+
+    def _emit_ui_intent(self, action: str, **kw) -> None:
+        """Fire a UI navigation intent targeted at the current command's issuer."""
+        self._broadcast_ephemeral({"type": "collab_ui_intent", "target": self._command_issuer,
+                                   "action": action, **kw})
+
+    async def _open_command_agent(self):
+        """Open a FRESH Haiku control agent (a non-panel SdkSession with the control MCP
+        server). Returns its session id, or None if the SDK isn't available. Each command
+        gets its OWN fresh session, so the router never remembers previous commands."""
+        from agents.collab.command import make_control_server, CONTROL_MODEL, CONTROL_DISALLOWED, SYSTEM_PROMPT
+        server = make_control_server(self)
+        if server is None:
+            return None
+        sess = SdkSession(self.cwd, key=None, key_field="session_id", emit=self.send,
+                          perms=self.acp_perms, permission="ask", agent="claude-sdk",
+                          model=CONTROL_MODEL, disallowed_tools=CONTROL_DISALLOWED,
+                          mcp_servers={"collab_control": server},
+                          setting_sources=[],                    # only its control tools, no user MCP
+                          system_prompt=SYSTEM_PROMPT,           # tiny prompt, not the big claude_code preset
+                          thinking={"type": "disabled"})         # routing needs no thinking → faster
+        try:
+            sid = await sess.open()
+        except Exception as exc:  # noqa: BLE001
+            self.send({"type": "collab_error", "message": f"command agent: {exc}"})
+            return None
+        self.sessions[sid] = sess
+        self._locks[sid] = asyncio.Lock()
+        self._command_sids.add(sid)
+        return sid
+
+    async def _prewarm_command(self):
+        """Open a spare router session in the background so the NEXT command is instant."""
+        if self._command_ready is not None or self._command_warming:
+            return
+        self._command_warming = True
+        try:
+            sid = await self._open_command_agent()
+            self._command_ready = sid
+            if sid is not None and sid in self.sessions:
+                await self.sessions[sid].warmup()   # skip the first-turn penalty on the real command
+        finally:
+            self._command_warming = False
+
+    async def _retire_command(self, sid: str):
+        """Discard a USED router session so no conversation memory carries to next time."""
+        self._command_sids.discard(sid)
+        if self._command == sid:
+            self._command = None
+        await self.remove_session(sid)
+
+    async def control_command(self, text: str, issuer: str = None) -> None:
+        """Route one natural-language command through a FRESH, memory-less router session
+        (a pre-warmed spare when available → fast; cold-start only as fallback). `issuer`
+        scopes the targeted UI intents + status ack to the window that asked."""
+        if not (text or "").strip():
+            return
+        sid = self._command_ready
+        self._command_ready = None
+        if sid is None:
+            sid = await self._open_command_agent()   # first command / rapid burst → cold start
+        if sid is None:
+            return
+        self._command = sid
+        self._command_issuer = issuer
+        asyncio.create_task(self._prewarm_command())   # warm the next one while we work
+        self._broadcast_ephemeral({"type": "collab_command_ack", "target": issuer, "state": "running"})
+        try:
+            await self.prompt(sid, text, sender=issuer)   # instructions live in the system prompt now
+            entries = self.sessions[sid].transcript.entries if sid in self.sessions else []
+            reply = next((e["text"] for e in reversed(entries) if e.get("kind") == "message"), "")
+            self._broadcast_ephemeral({"type": "collab_command_ack", "target": issuer, "state": "done",
+                                       "text": (reply or "").strip()[:200]})
+        except Exception as exc:  # noqa: BLE001
+            self._broadcast_ephemeral({"type": "collab_command_ack", "target": issuer, "state": "error",
+                                       "text": str(exc)[:200]})
+        finally:
+            asyncio.create_task(self._retire_command(sid))   # fresh session per command
 
     # ── collaborative doc editing (Yjs relayed over the shared socket) ─────────
     # The server is a dumb relay: it never merges CRDT state, it just keeps a per-file
